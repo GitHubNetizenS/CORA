@@ -41,19 +41,20 @@ CAVE:
     # experiment_name: 015_seed42_branch_cycle2e-3_no_agf_jac
     # experiment_name: 016_seed42_obs_target_corr_eta0p05
     # experiment_name: 017_seed42_branch_cycle_jac_no_reliability
-    experiment_name: 018_seed42_reliable_branch_cycle_fixed_pinv_spectral
+    # experiment_name: 018_seed42_reliable_branch_cycle_fixed_pinv_spectral
+    experiment_name: 020_seed42_fixed_pinv_branch_reliable_agf_fused
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_agf_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
     # 015：沿用 013 结构，将两个 branch cycle 权重从 0.001 提高到 0.002。
     # lambda_cycle_spatial: 0.002
     # lambda_cycle_spectral: 0.002
-    # 018：回到 013 的可靠 branch cycle + spatial jac，同时固定光谱拉回为 pinv(R)。
+    # 020：在 018 基础上只加回 AGF fused-cycle，用于消融 AGF 是否有额外正作用。
     lambda_cycle_spatial: 0.001
     lambda_cycle_spectral: 0.001
-    # 013：关闭 AGF fused cycle，只保留两个拉回分支 cycle 与双 Jacobian。
+    # 013/018：关闭 AGF fused cycle，只保留两个拉回分支 cycle 与 Jacobian。
     # lambda_cycle_fused: 0.02
-    lambda_cycle_fused: 0.0
+    lambda_cycle_fused: 0.01
     lambda_jac_spatial: 0.003
     lambda_jac_spectral: 0.0
     jac_interval: 10
