@@ -1,0 +1,83 @@
+# config.yaml文件
+# 该文件用于定义数据集训练和测试的相关参数。
+CAVE:
+  train:
+    downsample_factor: 8
+    training_size: 64
+    train_stride: 32
+#    train_stride: 64
+    lr: 0.0001
+    end_epoch: 1000
+#    end_epoch: 50
+#    end_epoch: 450
+    weight_decay: 0
+    batch_size: 16
+    num: 20
+#    num: 30
+    epoch_gap: 50
+    val_interval: 50
+    dataset_root: /root/autodl-tmp/datasets/lrtn/CAVE
+    run_root: /root/autodl-tmp/runs/AMSF-Net
+    # 拆分 cycle 实验：保留两个拉回分支，但分别设置权重。
+    # 旧版单一 cycle 权重写法：
+    # lambda_cycle: 0.0
+    # use_ddl=false 时完全不实例化 DDL，用于提高消融实验速度。
+    # use_base_degradation_consistency=false 时，基础损失中只保留边缘损失。
+    use_ddl: true
+    use_base_degradation_consistency: true
+    # 之前的 seed=42 base 续训配置：
+    # experiment_name: cycle_only_0
+    # legacy_cycle_only_log: true
+    # pullback_mode: legacy
+    # lambda_cycle_spatial: 0.0
+    # lambda_cycle_spectral: 0.0
+    # 之前正在运行的实验：
+    # experiment_name: 006_seed42_dual_pullback_agf_cycle_schedule
+    # experiment_name: 007_seed42_i1_edge_only
+    # experiment_name: 010_seed42_observation_guided_reliable_cycle
+    # experiment_name: 011_seed42_observation_guided_reliable_all_cycle
+    # experiment_name: 013_seed42_dual_pullback_no_fused_cycle_branch_jac
+    # experiment_name: 014_seed42_branch_cycle_jac_late_decay
+    # experiment_name: 015_seed42_branch_cycle2e-3_no_agf_jac
+    # experiment_name: 016_seed42_obs_target_corr_eta0p05
+    # experiment_name: 017_seed42_branch_cycle_jac_no_reliability
+    experiment_name: 018_seed42_reliable_branch_cycle_fixed_pinv_spectral
+    legacy_cycle_only_log: false
+    pullback_mode: dual_pullback_agf_v1
+    # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
+    # 015：沿用 013 结构，将两个 branch cycle 权重从 0.001 提高到 0.002。
+    # lambda_cycle_spatial: 0.002
+    # lambda_cycle_spectral: 0.002
+    # 018：回到 013 的可靠 branch cycle + spatial jac，同时固定光谱拉回为 pinv(R)。
+    lambda_cycle_spatial: 0.001
+    lambda_cycle_spectral: 0.001
+    # 013：关闭 AGF fused cycle，只保留两个拉回分支 cycle 与双 Jacobian。
+    # lambda_cycle_fused: 0.02
+    lambda_cycle_fused: 0.0
+    lambda_jac_spatial: 0.003
+    lambda_jac_spectral: 0.0
+    jac_interval: 10
+    spectral_pullback_learnable: false
+    # 014：沿用 013 结构，只在后期衰减 branch cycle 权重，观察能否保住 900 轮附近收益。
+    # 015：关闭 schedule，单独验证更强 branch cycle 是否有效。
+    cycle_schedule_enable: false
+    cycle_schedule_warmup_epoch: 0
+    cycle_schedule_decay_start_epoch: 800
+    cycle_schedule_final_scale: 0.3
+    # 018：恢复 013 的观测可靠性加权，避免 DDL 对不可靠 fake target 等权学习。
+    cycle_reliability_enable: true
+    cycle_reliability_tau: 2.0
+    cycle_reliability_min: 0.2
+    cycle_reliability_normalize: true
+    cycle_reliability_apply_to_branches: true
+    # 016：observation target correction，017 中关闭。
+    # observation_target_correction_enable: true
+    observation_target_correction_enable: false
+    observation_target_correction_eta: 0.05
+    observation_target_correction_clamp: true
+  test:
+    test_epoch: 50
+    test_stride: 32
+#    test_stride: 64
+    psnr_optimal: 42
+    rmse_optimal: 1.5
