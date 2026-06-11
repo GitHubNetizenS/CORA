@@ -126,8 +126,16 @@ def make_zero_ddl_items(reference):
         "reliability_weight_mean": zero,
         "reliability_weight_min": zero,
         "reliability_weight_max": zero,
+        "spatial_reliability_weight_mean": zero,
+        "spatial_reliability_weight_min": zero,
+        "spatial_reliability_weight_max": zero,
+        "spectral_reliability_weight_mean": zero,
+        "spectral_reliability_weight_min": zero,
+        "spectral_reliability_weight_max": zero,
         "obs_lr_error_mean": zero,
         "obs_ms_error_mean": zero,
+        "cross_spatial_ms_error_mean": zero,
+        "cross_spectral_lr_error_mean": zero,
         "target_corr_delta_spatial_mean": zero,
         "target_corr_delta_spectral_mean": zero,
         "target_corr_shift_mean": zero,
@@ -199,6 +207,7 @@ if "__main__"==__name__:
     lambda_jac_spectral = float(cfg["train"].get("lambda_jac_spectral", 0.0))
     jac_interval = int(cfg["train"].get("jac_interval", 1))
     cycle_reliability_enable = bool(cfg["train"].get("cycle_reliability_enable", False))
+    cycle_reliability_mode = cfg["train"].get("cycle_reliability_mode", "target_average")
     cycle_reliability_tau = float(cfg["train"].get("cycle_reliability_tau", 2.0))
     cycle_reliability_min = float(cfg["train"].get("cycle_reliability_min", 0.2))
     cycle_reliability_normalize = bool(cfg["train"].get("cycle_reliability_normalize", True))
@@ -312,7 +321,11 @@ if "__main__"==__name__:
                                        "jac_active_count", "jac_active_ratio", "mean_jac_loss", "mean_jac_eff",
                                        "cue_sam_mean", "cue_grad_mean", "gate_mean", "gate_min", "gate_max",
                                        "reliability_weight_mean", "reliability_weight_min", "reliability_weight_max",
+                                       "spatial_reliability_weight_mean", "spatial_reliability_weight_min",
+                                       "spatial_reliability_weight_max", "spectral_reliability_weight_mean",
+                                       "spectral_reliability_weight_min", "spectral_reliability_weight_max",
                                        "obs_lr_error_mean", "obs_ms_error_mean",
+                                       "cross_spatial_ms_error_mean", "cross_spectral_lr_error_mean",
                                        "target_corr_delta_spatial_mean", "target_corr_delta_spectral_mean",
                                        "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta"])
         df.to_csv(excel_path, index=False)
@@ -339,12 +352,14 @@ if "__main__"==__name__:
     optimizer_parameters = list(model.parameters())
     if use_ddl:
         dual_loss = DualLearningLoss(R, downsample_factor=downsample_factor,
+                                     psf=PSF,
                                      lambda_cycle_spatial=lambda_cycle_spatial,
                                      lambda_cycle_spectral=lambda_cycle_spectral,
                                      lambda_jac_spatial=lambda_jac_spatial,
                                      lambda_cycle_fused=lambda_cycle_fused,
                                      lambda_jac_spectral=lambda_jac_spectral,
                                      cycle_reliability_enable=cycle_reliability_enable,
+                                     cycle_reliability_mode=cycle_reliability_mode,
                                      cycle_reliability_tau=cycle_reliability_tau,
                                      cycle_reliability_min=cycle_reliability_min,
                                      cycle_reliability_normalize=cycle_reliability_normalize,
@@ -652,8 +667,16 @@ if "__main__"==__name__:
                             loss_ddl_items["reliability_weight_mean"].item(),
                             loss_ddl_items["reliability_weight_min"].item(),
                             loss_ddl_items["reliability_weight_max"].item(),
+                            loss_ddl_items["spatial_reliability_weight_mean"].item(),
+                            loss_ddl_items["spatial_reliability_weight_min"].item(),
+                            loss_ddl_items["spatial_reliability_weight_max"].item(),
+                            loss_ddl_items["spectral_reliability_weight_mean"].item(),
+                            loss_ddl_items["spectral_reliability_weight_min"].item(),
+                            loss_ddl_items["spectral_reliability_weight_max"].item(),
                             loss_ddl_items["obs_lr_error_mean"].item(),
                             loss_ddl_items["obs_ms_error_mean"].item(),
+                            loss_ddl_items["cross_spatial_ms_error_mean"].item(),
+                            loss_ddl_items["cross_spectral_lr_error_mean"].item(),
                             loss_ddl_items["target_corr_delta_spatial_mean"].item(),
                             loss_ddl_items["target_corr_delta_spectral_mean"].item(),
                             loss_ddl_items["target_corr_shift_mean"].item(),
