@@ -284,16 +284,20 @@ class MFF(nn.Module):
         # 上分支对应LFE1和LFE3，下分支对应LFE2和LFE4。
         # self.LFE1 = LFE(esa_channels, in_channels)
         # self.LFE2 = LFE(esa_channels, in_channels)
-        self.LFE2 = DAConv3D(in_channels, in_channels, kernel_size=5)
+        # self.LFE2 = DAConv3D(in_channels, in_channels, kernel_size=5)
         # self.LFE3 = LFE(esa_channels, in_channels)
         # self.LFE4 = LFE(esa_channels, in_channels)
-        self.LFE4 = DAConv3D(in_channels, in_channels, kernel_size=3)
-        self.LFE1 = DAConv2D(in_channels, in_channels, kernel_size=9)
+        # self.LFE4 = DAConv3D(in_channels, in_channels, kernel_size=3)
+        # self.LFE1 = DAConv2D(in_channels, in_channels, kernel_size=9)
+        self.LFE1 = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+        self.LFE2 = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
         # self.LFE2 = nn.Sequential(      #     nn.Conv2d(in_channels, in_channels, kernel_size=1),
         #     nn.BatchNorm2d(in_channels),
         #     nn.ReLU(inplace=True)
         # )
-        self.LFE3 = DAConv2D(in_channels, in_channels, kernel_size=5)
+        # self.LFE3 = DAConv2D(in_channels, in_channels, kernel_size=5)
+        self.LFE3 = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+        self.LFE4 = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
         # self.LFE4 = nn.Sequential(
         #     nn.Conv2d(in_channels, in_channels, kernel_size=1),
         #     nn.BatchNorm2d(in_channels),
@@ -360,10 +364,10 @@ class MFF(nn.Module):
         z1 = self.Resblock1(z)
         z2 = self.Resblock2(z1+x1+y1)
         # z_freq = self.fourier_unit(z2)
-        out_spat = x2 + x
-        out_spec = y2 + y
-        # out_spat = x2
-        # out_spec = y2
+        # out_spat = x2 + x
+        # out_spec = y2 + y
+        out_spat = x2
+        out_spec = y2
         # 融合支路终端合成。
         z3 = torch.cat((out_spat, out_spec, z2), dim=1)
         z4 = self.c3(z3)

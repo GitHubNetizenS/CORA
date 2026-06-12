@@ -23,7 +23,7 @@ CAVE:
     # lambda_cycle: 0.0
     # use_ddl=false 时完全不实例化 DDL，用于提高消融实验速度。
     # use_base_degradation_consistency=false 时，基础损失中只保留边缘损失。
-    use_ddl: true
+    use_ddl: false
     use_base_degradation_consistency: true
     # 之前的 seed=42 base 续训配置：
     # experiment_name: cycle_only_0
@@ -43,7 +43,8 @@ CAVE:
     # experiment_name: 017_seed42_branch_cycle_jac_no_reliability
     # experiment_name: 018_seed42_reliable_branch_cycle_fixed_pinv_spectral
     # experiment_name: 020_seed42_fixed_pinv_branch_reliable_agf_fused
-    experiment_name: 021_seed42_cross_observation_branch_reliability
+    # experiment_name: 021_seed42_cross_observation_branch_reliability
+    experiment_name: 022_seed42_original_baseline_no_i1_no_ddl
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_agf_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
