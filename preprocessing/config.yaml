@@ -23,7 +23,7 @@ CAVE:
     # lambda_cycle: 0.0
     # use_ddl=false 时完全不实例化 DDL，用于提高消融实验速度。
     # use_base_degradation_consistency=false 时，基础损失中只保留边缘损失。
-    use_ddl: false
+    use_ddl: true
     use_base_degradation_consistency: true
     # 之前的 seed=42 base 续训配置：
     # experiment_name: cycle_only_0
@@ -44,7 +44,8 @@ CAVE:
     # experiment_name: 018_seed42_reliable_branch_cycle_fixed_pinv_spectral
     # experiment_name: 020_seed42_fixed_pinv_branch_reliable_agf_fused
     # experiment_name: 021_seed42_cross_observation_branch_reliability
-    experiment_name: 022_seed42_original_baseline_no_i1_no_ddl
+    # experiment_name: 022_seed42_original_baseline_no_i1_no_ddl
+    experiment_name: 023_seed42_018_no_jac
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_agf_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -58,7 +59,9 @@ CAVE:
     # lambda_cycle_fused: 0.02
     # lambda_cycle_fused: 0.01
     lambda_cycle_fused: 0.0
-    lambda_jac_spatial: 0.003
+    # 023：基于 018，只关闭 Jacobian-loss，检验 Jacobian 是否限制 DDL 表达。
+    # lambda_jac_spatial: 0.003
+    lambda_jac_spatial: 0.0
     lambda_jac_spectral: 0.0
     jac_interval: 10
     spectral_pullback_learnable: false
@@ -70,7 +73,7 @@ CAVE:
     cycle_schedule_final_scale: 0.3
     # 018：恢复 013 的观测可靠性加权，避免 DDL 对不可靠 fake target 等权学习。
     cycle_reliability_enable: true
-    cycle_reliability_mode: cross_observation
+    cycle_reliability_mode: target_average
     cycle_reliability_tau: 2.0
     cycle_reliability_min: 0.2
     cycle_reliability_normalize: true
