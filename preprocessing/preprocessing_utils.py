@@ -1049,6 +1049,112 @@ class LearnableSpatialPullback(nn.Module):
         return blurred + residual
 
 
+class DegradationEdgeAttentionSpatialPullback(nn.Module):
+    """
+    Degradation-edge guided spatial pullback.
+
+    The module keeps the original upsample-blur result as a stable base, then
+    uses fixed Sobel/Laplacian edge cues and Gaussian residual cues to guide a
+    lightweight local attention refinement.
+    """
+    def __init__(self, blur_kernel=[1, 2, 1], scale_factor=8, channels=1):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.channels = channels
+
+        kernel = torch.tensor(blur_kernel, dtype=torch.float32)
+        kernel = kernel / kernel.sum()
+        kernel = torch.outer(kernel, kernel)
+        self.blur_kernel = nn.Parameter(
+            kernel.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+            requires_grad=True,
+        )
+        self.register_buffer(
+            "gaussian_kernel",
+            kernel.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+
+        sobel_x = torch.tensor(
+            [[-1.0, 0.0, 1.0],
+             [-2.0, 0.0, 2.0],
+             [-1.0, 0.0, 1.0]],
+            dtype=torch.float32,
+        ) / 8.0
+        sobel_y = sobel_x.t()
+        laplacian = torch.tensor(
+            [[0.0, 1.0, 0.0],
+             [1.0, -4.0, 1.0],
+             [0.0, 1.0, 0.0]],
+            dtype=torch.float32,
+        ) / 4.0
+        self.register_buffer(
+            "sobel_x",
+            sobel_x.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+        self.register_buffer(
+            "sobel_y",
+            sobel_y.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+        self.register_buffer(
+            "laplacian",
+            laplacian.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+
+        hidden_channels = channels * 2
+        attention_hidden = hidden_channels // 2
+        if attention_hidden < 8:
+            attention_hidden = 8
+
+        self.local_embed = nn.Sequential(
+            nn.Conv2d(channels * 3, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, groups=hidden_channels),
+            nn.GELU(),
+        )
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(hidden_channels, attention_hidden, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(attention_hidden, hidden_channels, kernel_size=1),
+            nn.Sigmoid(),
+        )
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, groups=hidden_channels),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, 1, kernel_size=1),
+            nn.Sigmoid(),
+        )
+        self.residual_refine = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, groups=hidden_channels),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, channels, kernel_size=1),
+        )
+        self.residual_scale = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
+
+        # Start from the previous LearnableSpatialPullback behavior. The edge
+        # attention path becomes active only after this projection is updated.
+        nn.init.zeros_(self.residual_refine[-1].weight)
+        nn.init.zeros_(self.residual_refine[-1].bias)
+
+    def forward(self, x):
+        x_up = F.interpolate(x, scale_factor=self.scale_factor, mode="bilinear", align_corners=False)
+        blurred = F.conv2d(x_up, weight=self.blur_kernel, padding=1, groups=self.channels)
+
+        low_pass = F.conv2d(x_up, weight=self.gaussian_kernel, padding=1, groups=self.channels)
+        degradation_residual = x_up - low_pass
+
+        edge_x = F.conv2d(x_up, weight=self.sobel_x, padding=1, groups=self.channels)
+        edge_y = F.conv2d(x_up, weight=self.sobel_y, padding=1, groups=self.channels)
+        edge_lap = F.conv2d(x_up, weight=self.laplacian, padding=1, groups=self.channels)
+        edge_cue = torch.abs(edge_x) + torch.abs(edge_y) + 0.5 * torch.abs(edge_lap)
+
+        features = self.local_embed(torch.cat([blurred, degradation_residual, edge_cue], dim=1))
+        attention = self.channel_attention(features) * self.spatial_attention(features)
+        residual = self.residual_refine(features * attention)
+
+        return blurred + self.residual_scale * residual
+
+
 class LearnableSpectralPullback(nn.Module):
     """
     Learnable spectral pullback initialized from the physical pinv(R) mapping.
@@ -1196,7 +1302,10 @@ class DualLearningLoss(nn.Module):
             psf = fspecial("gaussian", downsample_factor, 3)
         self.reliability_spatial_down = SpatialDownsample(psf, downsample_factor)
         self.pullback_mode = pullback_mode
-        self.use_dual_pullback_fusion = pullback_mode == "dual_pullback_agf_v1"
+        self.use_dual_pullback_fusion = pullback_mode in (
+            "dual_pullback_agf_v1",
+            "dual_pullback_edge_attention_v1",
+        )
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
         self.pullback_fusion = None
@@ -1212,6 +1321,14 @@ class DualLearningLoss(nn.Module):
         elif pullback_mode == "dual_pullback_agf_v1":
             self.upsample_blur = LearnableSpatialPullback(scale_factor=downsample_factor, channels=response.shape[1])
             # 018 消融：光谱拉回可固定为 pinv(R)，用于验证可学习光谱 residual 是否引入后期漂移。
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_edge_attention_v1":
+            self.upsample_blur = DegradationEdgeAttentionSpatialPullback(
+                scale_factor=downsample_factor,
+                channels=response.shape[1],
+            )
             if self.spectral_pullback_learnable:
                 self.spectral_pullback = LearnableSpectralPullback(response)
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
