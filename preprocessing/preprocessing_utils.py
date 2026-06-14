@@ -1155,6 +1155,69 @@ class DegradationEdgeAttentionSpatialPullback(nn.Module):
         return blurred + self.residual_scale * residual
 
 
+class DegradationEdgeResidualSpatialPullback(nn.Module):
+    """
+    Lightweight degradation-edge residual spatial pullback.
+
+    Compared with DegradationEdgeAttentionSpatialPullback, this module removes
+    channel/spatial attention and keeps only Sobel edge cues plus a zero-init
+    residual branch. It is used to test whether degradation-edge information is
+    useful without introducing a heavy attention block.
+    """
+    def __init__(self, blur_kernel=[1, 2, 1], scale_factor=8, channels=1):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.channels = channels
+        self.residual_scale = 0.05
+
+        kernel = torch.tensor(blur_kernel, dtype=torch.float32)
+        kernel = kernel / kernel.sum()
+        kernel = torch.outer(kernel, kernel)
+        self.blur_kernel = nn.Parameter(
+            kernel.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+            requires_grad=True,
+        )
+
+        sobel_x = torch.tensor(
+            [[-1.0, 0.0, 1.0],
+             [-2.0, 0.0, 2.0],
+             [-1.0, 0.0, 1.0]],
+            dtype=torch.float32,
+        ) / 8.0
+        sobel_y = sobel_x.t()
+        self.register_buffer(
+            "sobel_x",
+            sobel_x.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+        self.register_buffer(
+            "sobel_y",
+            sobel_y.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+
+        hidden_channels = channels * 2
+        self.residual_refine = nn.Sequential(
+            nn.Conv2d(channels * 2, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, groups=hidden_channels),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, channels, kernel_size=1),
+        )
+        nn.init.zeros_(self.residual_refine[-1].weight)
+        nn.init.zeros_(self.residual_refine[-1].bias)
+
+    def forward(self, x):
+        x_up = F.interpolate(x, scale_factor=self.scale_factor, mode="bilinear", align_corners=False)
+        blurred = F.conv2d(x_up, weight=self.blur_kernel, padding=1, groups=self.channels)
+
+        edge_x = F.conv2d(x_up, weight=self.sobel_x, padding=1, groups=self.channels)
+        edge_y = F.conv2d(x_up, weight=self.sobel_y, padding=1, groups=self.channels)
+        edge_cue = torch.abs(edge_x) + torch.abs(edge_y)
+
+        residual = self.residual_refine(torch.cat([blurred, edge_cue], dim=1))
+
+        return blurred + self.residual_scale * residual
+
+
 class LearnableSpectralPullback(nn.Module):
     """
     Learnable spectral pullback initialized from the physical pinv(R) mapping.
@@ -1305,6 +1368,7 @@ class DualLearningLoss(nn.Module):
         self.use_dual_pullback_fusion = pullback_mode in (
             "dual_pullback_agf_v1",
             "dual_pullback_edge_attention_v1",
+            "dual_pullback_edge_residual_v1",
         )
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
@@ -1326,6 +1390,14 @@ class DualLearningLoss(nn.Module):
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
         elif pullback_mode == "dual_pullback_edge_attention_v1":
             self.upsample_blur = DegradationEdgeAttentionSpatialPullback(
+                scale_factor=downsample_factor,
+                channels=response.shape[1],
+            )
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_edge_residual_v1":
+            self.upsample_blur = DegradationEdgeResidualSpatialPullback(
                 scale_factor=downsample_factor,
                 channels=response.shape[1],
             )
