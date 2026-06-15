@@ -48,9 +48,10 @@ CAVE:
     # experiment_name: 023_seed42_018_no_jac
     # experiment_name: 024_seed42_018_with_spectral_jac
     # experiment_name: 025_seed42_degradation_edge_attention_pullback
-    experiment_name: 026_seed42_edge_residual_pullback
+    # experiment_name: 026_seed42_edge_residual_pullback
+    experiment_name: 027_seed42_legacy_spatial_pullback
     legacy_cycle_only_log: false
-    pullback_mode: dual_pullback_edge_residual_v1
+    pullback_mode: dual_pullback_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
     # 015：沿用 013 结构，将两个 branch cycle 权重从 0.001 提高到 0.002。
     # lambda_cycle_spatial: 0.002
