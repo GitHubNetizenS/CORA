@@ -1370,6 +1370,7 @@ class DualLearningLoss(nn.Module):
             "dual_pullback_edge_attention_v1",
             "dual_pullback_edge_residual_v1",
             "dual_pullback_legacy_spatial_v1",
+            "dual_pullback_fixed_legacy_spatial_v1",
         )
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
@@ -1407,6 +1408,12 @@ class DualLearningLoss(nn.Module):
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
         elif pullback_mode == "dual_pullback_legacy_spatial_v1":
             self.upsample_blur = UpsampleBlur(scale_factor=downsample_factor, channels=response.shape[1])
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_fixed_legacy_spatial_v1":
+            self.upsample_blur = UpsampleBlur(scale_factor=downsample_factor, channels=response.shape[1])
+            self.upsample_blur.blur_kernel.requires_grad_(False)
             if self.spectral_pullback_learnable:
                 self.spectral_pullback = LearnableSpectralPullback(response)
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
