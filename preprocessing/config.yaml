@@ -6,6 +6,7 @@ CAVE:
     training_size: 64
     train_stride: 32
 #    train_stride: 64
+    seed: 43
     lr: 0.0001
     end_epoch: 1000
 #    end_epoch: 50
@@ -51,7 +52,8 @@ CAVE:
     # experiment_name: 026_seed42_edge_residual_pullback
     # experiment_name: 027_seed42_legacy_spatial_pullback
     # experiment_name: 028_seed42_fixed_legacy_spatial_pullback
-    experiment_name: 029_seed42_fixed_legacy_no_jac
+    # experiment_name: 029_seed42_fixed_legacy_no_jac
+    experiment_name: 030_seed43_fixed_legacy_spatial_pullback
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -68,8 +70,8 @@ CAVE:
     # 023：基于 018，只关闭 Jacobian-loss，检验 Jacobian 是否限制 DDL 表达。
     # lambda_jac_spatial: 0.0
     # 024：基于 018，加回 spectral Jacobian，用于验证对称 Jacobian 约束是否有收益。
-    lambda_jac_spatial: 0.0
-    lambda_jac_spectral: 0.0
+    lambda_jac_spatial: 0.003
+    lambda_jac_spectral: 0.0003
     jac_interval: 10
     spectral_pullback_learnable: false
     # 014：沿用 013 结构，只在后期衰减 branch cycle 权重，观察能否保住 900 轮附近收益。

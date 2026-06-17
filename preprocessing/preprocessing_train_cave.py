@@ -194,6 +194,8 @@ if "__main__"==__name__:
     # 2. 读取 CAVE 数据集配置。
     with open("config.yaml", 'r', encoding="utf-8") as f:
         cfg = yaml.safe_load(f)["CAVE"]
+    seed = int(cfg["train"].get("seed", 42))
+    set_seed(seed)
 
     # Previous single cycle weight:
     # lambda_cycle = float(cfg["train"]["lambda_cycle"])
