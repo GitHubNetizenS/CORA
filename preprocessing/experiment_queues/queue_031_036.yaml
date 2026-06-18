@@ -1,0 +1,124 @@
+experiments:
+  - name: 031_seed43_base_no_ddl
+    train:
+      experiment_name: 031_seed43_base_no_ddl
+      seed: 43
+      use_ddl: false
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_fixed_legacy_spatial_v1
+      cycle_reliability_mode: target_average
+
+  - name: 032_seed42_robust_ob_rely
+    train:
+      experiment_name: 032_seed42_robust_ob_rely
+      seed: 42
+      use_ddl: true
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_fixed_legacy_spatial_v1
+      lambda_cycle_spatial: 0.001
+      lambda_cycle_spectral: 0.001
+      lambda_cycle_fused: 0.0
+      lambda_jac_spatial: 0.003
+      lambda_jac_spectral: 0.0003
+      jac_interval: 10
+      spectral_pullback_learnable: false
+      cycle_schedule_enable: false
+      cycle_reliability_enable: true
+      cycle_reliability_mode: robust_observation
+      cycle_reliability_tau: 2.0
+      cycle_reliability_min: 0.2
+      cycle_reliability_normalize: true
+      cycle_reliability_apply_to_branches: true
+      observation_target_correction_enable: false
+
+  - name: 033_seed42_structure_ob_rely
+    train:
+      experiment_name: 033_seed42_structure_ob_rely
+      seed: 42
+      use_ddl: true
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_fixed_legacy_spatial_v1
+      lambda_cycle_spatial: 0.001
+      lambda_cycle_spectral: 0.001
+      lambda_cycle_fused: 0.0
+      lambda_jac_spatial: 0.003
+      lambda_jac_spectral: 0.0003
+      jac_interval: 10
+      spectral_pullback_learnable: false
+      cycle_schedule_enable: false
+      cycle_reliability_enable: true
+      cycle_reliability_mode: structure_observation
+      cycle_reliability_tau: 2.0
+      cycle_reliability_min: 0.2
+      cycle_reliability_normalize: true
+      cycle_reliability_apply_to_branches: true
+      observation_target_correction_enable: false
+
+  - name: 034_seed42_frequency_ob_rely
+    train:
+      experiment_name: 034_seed42_frequency_ob_rely
+      seed: 42
+      use_ddl: true
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_fixed_legacy_spatial_v1
+      lambda_cycle_spatial: 0.001
+      lambda_cycle_spectral: 0.001
+      lambda_cycle_fused: 0.0
+      lambda_jac_spatial: 0.003
+      lambda_jac_spectral: 0.0003
+      jac_interval: 10
+      spectral_pullback_learnable: false
+      cycle_schedule_enable: false
+      cycle_reliability_enable: true
+      cycle_reliability_mode: frequency_observation
+      cycle_reliability_tau: 2.0
+      cycle_reliability_min: 0.2
+      cycle_reliability_normalize: true
+      cycle_reliability_apply_to_branches: true
+      observation_target_correction_enable: false
+
+  - name: 035_seed42_constrained_kernel_pullback
+    train:
+      experiment_name: 035_seed42_constrained_kernel_pullback
+      seed: 42
+      use_ddl: true
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_constrained_kernel_v1
+      lambda_cycle_spatial: 0.001
+      lambda_cycle_spectral: 0.001
+      lambda_cycle_fused: 0.0
+      lambda_jac_spatial: 0.003
+      lambda_jac_spectral: 0.0003
+      jac_interval: 10
+      spectral_pullback_learnable: false
+      cycle_schedule_enable: false
+      cycle_reliability_enable: true
+      cycle_reliability_mode: target_average
+      cycle_reliability_tau: 2.0
+      cycle_reliability_min: 0.2
+      cycle_reliability_normalize: true
+      cycle_reliability_apply_to_branches: true
+      observation_target_correction_enable: false
+
+  - name: 036_seed42_psf_matched_pullback
+    train:
+      experiment_name: 036_seed42_psf_matched_pullback
+      seed: 42
+      use_ddl: true
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_psf_matched_v1
+      lambda_cycle_spatial: 0.001
+      lambda_cycle_spectral: 0.001
+      lambda_cycle_fused: 0.0
+      lambda_jac_spatial: 0.003
+      lambda_jac_spectral: 0.0003
+      jac_interval: 10
+      spectral_pullback_learnable: false
+      cycle_schedule_enable: false
+      cycle_reliability_enable: true
+      cycle_reliability_mode: target_average
+      cycle_reliability_tau: 2.0
+      cycle_reliability_min: 0.2
+      cycle_reliability_normalize: true
+      cycle_reliability_apply_to_branches: true
+      observation_target_correction_enable: false

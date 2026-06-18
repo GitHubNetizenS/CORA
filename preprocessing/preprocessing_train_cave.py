@@ -7,6 +7,7 @@ import math                 as math
 import os                   as os
 import time                 as time
 import shutil               as shutil
+import argparse             as argparse
 import yaml                 as yaml
 import pandas               as pd
 import seaborn              as sns
@@ -188,11 +189,15 @@ def apply_cycle_schedule(dual_loss, epoch, end_epoch, base_cycle_weights, schedu
 
 
 if "__main__"==__name__:
+    parser = argparse.ArgumentParser(description="Train AMSF-Net CAVE experiments.")
+    parser.add_argument("--config", default="config.yaml", help="Path to the experiment config YAML.")
+    args = parser.parse_args()
+    config_file = args.config
+
     # ===========================================================================================
-    # 1. 固定随机种子，用于可复现实验。
+    # 读取 CAVE 数据集配置，并以配置中的 seed 作为最终随机种子。
     set_seed(42)
-    # 2. 读取 CAVE 数据集配置。
-    with open("config.yaml", 'r', encoding="utf-8") as f:
+    with open(config_file, 'r', encoding="utf-8") as f:
         cfg = yaml.safe_load(f)["CAVE"]
     seed = int(cfg["train"].get("seed", 42))
     set_seed(seed)
@@ -298,7 +303,7 @@ if "__main__"==__name__:
 
     config_snapshot = os.path.join(config_path, f"{cycle_experiment_name}_config.yaml")
     if not os.path.exists(config_snapshot):
-        shutil.copy2("config.yaml", config_snapshot)
+        shutil.copy2(config_file, config_snapshot)
 
     excel_name = f"{cycle_experiment_name}_cave_record.csv"
     # excel_name = "harvard_record.csv"

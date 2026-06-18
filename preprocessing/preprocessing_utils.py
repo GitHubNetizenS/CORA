@@ -755,6 +755,70 @@ class UpsampleBlur(nn.Module):
         return self.apply_upsample_blur(x)
 
 
+class ConstrainedKernelUpsampleBlur(nn.Module):
+    """
+    Spatial pullback with a weakly learnable blur kernel.
+
+    The effective kernel is constrained near the legacy [1, 2, 1] separable
+    kernel, so it can adapt slightly without drifting far from the physical
+    pullback prior.
+    """
+    def __init__(self, blur_kernel=[1, 2, 1], scale_factor=8, channels=1, alpha=0.1):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.channels = channels
+        self.alpha = float(alpha)
+
+        kernel = torch.tensor(blur_kernel, dtype=torch.float32)
+        kernel = kernel / kernel.sum()
+        kernel = torch.outer(kernel, kernel)
+        kernel = kernel.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1)
+        self.register_buffer("fixed_kernel", kernel)
+        self.raw_kernel = nn.Parameter(torch.log(kernel.clamp_min(1e-6)))
+
+    def current_kernel(self):
+        b, c, h, w = self.raw_kernel.shape
+        learned_kernel = torch.softmax(self.raw_kernel.view(b, c, -1), dim=-1).view(b, c, h, w)
+        return (1.0 - self.alpha) * self.fixed_kernel + self.alpha * learned_kernel
+
+    def forward(self, x):
+        x_up = F.interpolate(x, scale_factor=self.scale_factor, mode="bilinear", align_corners=False)
+        kernel = self.current_kernel()
+        return F.conv2d(x_up, weight=kernel, padding=kernel.size(-1) // 2, groups=self.channels)
+
+
+class PSFMatchedUpsampleBlur(nn.Module):
+    """
+    Fixed Gaussian spatial pullback with a wider kernel than legacy UpsampleBlur.
+
+    This tests whether the LRHSI pullback should be closer to the LRTN Gaussian
+    degradation trend instead of the simple 3x3 [1, 2, 1] kernel.
+    """
+    def __init__(self, scale_factor=8, channels=1, kernel_size=5, sigma=1.5):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.channels = channels
+
+        coords = torch.arange(kernel_size, dtype=torch.float32) - (kernel_size - 1) / 2.0
+        kernel_1d = torch.exp(-(coords ** 2) / (2.0 * sigma * sigma))
+        kernel_1d = kernel_1d / kernel_1d.sum()
+        kernel = torch.outer(kernel_1d, kernel_1d)
+        kernel = kernel / kernel.sum()
+        self.register_buffer(
+            "blur_kernel",
+            kernel.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+
+    def forward(self, x):
+        x_up = F.interpolate(x, scale_factor=self.scale_factor, mode="bilinear", align_corners=False)
+        return F.conv2d(
+            x_up,
+            weight=self.blur_kernel,
+            padding=self.blur_kernel.size(-1) // 2,
+            groups=self.channels,
+        )
+
+
 class ResidualGatedUpsampleBlur(nn.Module):
     """
     A nonlinear spatial pullback that keeps the original upsample-blur path as
@@ -1371,6 +1435,8 @@ class DualLearningLoss(nn.Module):
             "dual_pullback_edge_residual_v1",
             "dual_pullback_legacy_spatial_v1",
             "dual_pullback_fixed_legacy_spatial_v1",
+            "dual_pullback_constrained_kernel_v1",
+            "dual_pullback_psf_matched_v1",
         )
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
@@ -1414,6 +1480,25 @@ class DualLearningLoss(nn.Module):
         elif pullback_mode == "dual_pullback_fixed_legacy_spatial_v1":
             self.upsample_blur = UpsampleBlur(scale_factor=downsample_factor, channels=response.shape[1])
             self.upsample_blur.blur_kernel.requires_grad_(False)
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_constrained_kernel_v1":
+            self.upsample_blur = ConstrainedKernelUpsampleBlur(
+                scale_factor=downsample_factor,
+                channels=response.shape[1],
+                alpha=0.1,
+            )
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_psf_matched_v1":
+            self.upsample_blur = PSFMatchedUpsampleBlur(
+                scale_factor=downsample_factor,
+                channels=response.shape[1],
+                kernel_size=5,
+                sigma=1.5,
+            )
             if self.spectral_pullback_learnable:
                 self.spectral_pullback = LearnableSpectralPullback(response)
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
@@ -1489,6 +1574,50 @@ class DualLearningLoss(nn.Module):
             "target_corr_eta": reference.new_tensor(0.0),
         }
 
+    def _normalize_observation_error(self, error):
+        eps = 1e-6
+        if not self.cycle_reliability_normalize:
+            return error
+        denom = error.detach().mean(dim=(2, 3), keepdim=True) + eps
+        return error / denom
+
+    @staticmethod
+    def _robust_normalize_observation_error(error):
+        eps = 1e-6
+        flat = error.detach().flatten(start_dim=2)
+        median = flat.median(dim=2).values.view(error.size(0), error.size(1), 1, 1)
+        mad = torch.abs(error.detach() - median).flatten(start_dim=2).median(dim=2).values
+        mad = mad.view(error.size(0), error.size(1), 1, 1)
+        scale = median + mad + eps
+        return torch.clamp(error / scale, min=0.0, max=6.0)
+
+    @staticmethod
+    def _sobel_error(pred, target):
+        pred_x, pred_y = sobel_gradient(pred.detach())
+        target_x, target_y = sobel_gradient(target.detach())
+        return (torch.abs(pred_x - target_x) + torch.abs(pred_y - target_y)).mean(dim=1, keepdim=True)
+
+    @staticmethod
+    def _haar_high_frequency(x):
+        h_even = x.size(2) - (x.size(2) % 2)
+        w_even = x.size(3) - (x.size(3) % 2)
+        x = x[:, :, :h_even, :w_even]
+        x00 = x[:, :, 0::2, 0::2]
+        x01 = x[:, :, 0::2, 1::2]
+        x10 = x[:, :, 1::2, 0::2]
+        x11 = x[:, :, 1::2, 1::2]
+        lh = (x00 + x01 - x10 - x11) * 0.5
+        hl = (x00 - x01 + x10 - x11) * 0.5
+        hh = (x00 - x01 - x10 + x11) * 0.5
+        return lh, hl, hh
+
+    @classmethod
+    def _haar_error(cls, pred, target):
+        pred_lh, pred_hl, pred_hh = cls._haar_high_frequency(pred.detach())
+        target_lh, target_hl, target_hh = cls._haar_high_frequency(target.detach())
+        error = torch.abs(pred_lh - target_lh) + torch.abs(pred_hl - target_hl) + torch.abs(pred_hh - target_hh)
+        return error.mean(dim=1, keepdim=True)
+
     def observation_reliability_weight(self, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, reference):
         """根据真实观测域残差估计 cycle target 的可靠性权重。"""
         if not self.cycle_reliability_enable:
@@ -1519,15 +1648,47 @@ class DualLearningLoss(nn.Module):
         )
         ms_error = torch.mean(torch.abs(output_hrmsi.detach() - hr_msi), dim=1, keepdim=True)
 
-        lr_error_for_weight = lr_error_hr
-        ms_error_for_weight = ms_error
-        if self.cycle_reliability_normalize:
-            lr_denom = lr_error_hr.detach().mean(dim=(2, 3), keepdim=True) + eps
-            ms_denom = ms_error.detach().mean(dim=(2, 3), keepdim=True) + eps
-            lr_error_for_weight = lr_error_hr / lr_denom
-            ms_error_for_weight = ms_error / ms_denom
-
+        lr_error_for_weight = self._normalize_observation_error(lr_error_hr)
+        ms_error_for_weight = self._normalize_observation_error(ms_error)
         observation_error = 0.5 * (lr_error_for_weight + ms_error_for_weight)
+
+        if self.cycle_reliability_mode == "robust_observation":
+            observation_error = self._robust_normalize_observation_error(observation_error)
+        elif self.cycle_reliability_mode == "structure_observation":
+            lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
+            lr_structure_hr = F.interpolate(
+                lr_structure,
+                size=reference.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            ms_structure = self._sobel_error(output_hrmsi, hr_msi)
+            structure_error = 0.5 * (
+                self._normalize_observation_error(lr_structure_hr)
+                + self._normalize_observation_error(ms_structure)
+            )
+            observation_error = observation_error + structure_error
+        elif self.cycle_reliability_mode == "frequency_observation":
+            lr_hf = self._haar_error(output_lrhsi, lr_hsi)
+            lr_hf_hr = F.interpolate(
+                lr_hf,
+                size=reference.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            ms_hf = self._haar_error(output_hrmsi, hr_msi)
+            ms_hf_hr = F.interpolate(
+                ms_hf,
+                size=reference.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            frequency_error = 0.5 * (
+                self._normalize_observation_error(lr_hf_hr)
+                + self._normalize_observation_error(ms_hf_hr)
+            )
+            observation_error = observation_error + frequency_error
+
         reliability = torch.exp(-self.cycle_reliability_tau * observation_error)
         reliability = self.cycle_reliability_min + (1.0 - self.cycle_reliability_min) * reliability
 
