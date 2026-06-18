@@ -24,7 +24,7 @@ CAVE:
     # lambda_cycle: 0.0
     # use_ddl=false 时完全不实例化 DDL，用于提高消融实验速度。
     # use_base_degradation_consistency=false 时，基础损失中只保留边缘损失。
-    use_ddl: true
+    use_ddl: false
     use_base_degradation_consistency: true
     # 之前的 seed=42 base 续训配置：
     # experiment_name: cycle_only_0
@@ -53,7 +53,8 @@ CAVE:
     # experiment_name: 027_seed42_legacy_spatial_pullback
     # experiment_name: 028_seed42_fixed_legacy_spatial_pullback
     # experiment_name: 029_seed42_fixed_legacy_no_jac
-    experiment_name: 030_seed43_fixed_legacy_spatial_pullback
+    # experiment_name: 030_seed43_fixed_legacy_spatial_pullback
+    experiment_name: 031_seed43_base_no_ddl
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
