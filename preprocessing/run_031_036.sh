@@ -7,10 +7,32 @@ QUEUE_FILE="${SCRIPT_DIR}/experiment_queues/queue_031_036.yaml"
 GENERATED_DIR="${SCRIPT_DIR}/experiment_queues/generated_configs"
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/bin/python}"
 DRY_RUN=0
+START_FROM="${START_FROM:-}"
 
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=1
-fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      ;;
+    --from)
+      if [[ $# -lt 2 ]]; then
+        echo "--from requires an experiment number or name, for example: --from 034" >&2
+        exit 1
+      fi
+      START_FROM="$2"
+      shift
+      ;;
+    --from=*)
+      START_FROM="${1#--from=}"
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      echo "Usage: bash run_031_036.sh [--dry-run] [--from 034]" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
 
 if [[ ! -f "${BASE_CONFIG}" ]]; then
   echo "Missing base config: ${BASE_CONFIG}" >&2
@@ -22,7 +44,7 @@ if [[ ! -f "${QUEUE_FILE}" ]]; then
   exit 1
 fi
 
-mapfile -t EXPERIMENT_LINES < <("${PYTHON_BIN}" - "${BASE_CONFIG}" "${QUEUE_FILE}" "${GENERATED_DIR}" "${DRY_RUN}" <<'PY'
+mapfile -t EXPERIMENT_LINES < <("${PYTHON_BIN}" - "${BASE_CONFIG}" "${QUEUE_FILE}" "${GENERATED_DIR}" "${DRY_RUN}" "${START_FROM}" <<'PY'
 import copy
 import sys
 from pathlib import Path
@@ -33,6 +55,7 @@ base_config = Path(sys.argv[1])
 queue_file = Path(sys.argv[2])
 generated_dir = Path(sys.argv[3])
 dry_run = sys.argv[4] == "1"
+start_from = sys.argv[5].strip()
 
 with base_config.open("r", encoding="utf-8") as f:
     base = yaml.safe_load(f)
@@ -41,6 +64,20 @@ with queue_file.open("r", encoding="utf-8") as f:
     queue = yaml.safe_load(f)
 
 experiments = queue.get("experiments", [])
+if start_from:
+    filtered = []
+    found = False
+    for exp in experiments:
+        name = exp["name"]
+        if not found and (name == start_from or name.startswith(start_from) or name.startswith(f"{start_from}_")):
+            found = True
+        if found:
+            filtered.append(exp)
+    if not found:
+        names = ", ".join(exp["name"] for exp in experiments)
+        raise SystemExit(f"Cannot find --from {start_from!r}. Available experiments: {names}")
+    experiments = filtered
+
 if dry_run:
     for exp in experiments:
         print(exp["name"])
