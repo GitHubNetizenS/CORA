@@ -1618,6 +1618,16 @@ class DualLearningLoss(nn.Module):
         error = torch.abs(pred_lh - target_lh) + torch.abs(pred_hl - target_hl) + torch.abs(pred_hh - target_hh)
         return error.mean(dim=1, keepdim=True)
 
+    def _observation_error_to_reliability(self, observation_error):
+        eps = 1e-6
+        reliability = torch.exp(-self.cycle_reliability_tau * observation_error)
+        reliability = self.cycle_reliability_min + (1.0 - self.cycle_reliability_min) * reliability
+
+        if self.cycle_reliability_normalize:
+            reliability = reliability / (reliability.detach().mean(dim=(2, 3), keepdim=True) + eps)
+
+        return reliability.detach()
+
     def observation_reliability_weight(self, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, reference):
         """根据真实观测域残差估计 cycle target 的可靠性权重。"""
         if not self.cycle_reliability_enable:
@@ -1638,7 +1648,6 @@ class DualLearningLoss(nn.Module):
                 "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
             }
 
-        eps = 1e-6
         lr_error = torch.mean(torch.abs(output_lrhsi.detach() - lr_hsi), dim=1, keepdim=True)
         lr_error_hr = F.interpolate(
             lr_error,
@@ -1689,13 +1698,7 @@ class DualLearningLoss(nn.Module):
             )
             observation_error = observation_error + frequency_error
 
-        reliability = torch.exp(-self.cycle_reliability_tau * observation_error)
-        reliability = self.cycle_reliability_min + (1.0 - self.cycle_reliability_min) * reliability
-
-        if self.cycle_reliability_normalize:
-            reliability = reliability / (reliability.detach().mean(dim=(2, 3), keepdim=True) + eps)
-
-        reliability = reliability.detach()
+        reliability = self._observation_error_to_reliability(observation_error)
         return reliability, {
             "reliability_weight_mean": reliability.mean().detach(),
             "reliability_weight_min": reliability.amin().detach(),
@@ -1706,6 +1709,55 @@ class DualLearningLoss(nn.Module):
             "spectral_reliability_weight_mean": reliability.mean().detach(),
             "spectral_reliability_weight_min": reliability.amin().detach(),
             "spectral_reliability_weight_max": reliability.amax().detach(),
+            "obs_lr_error_mean": lr_error_hr.mean().detach(),
+            "obs_ms_error_mean": ms_error.mean().detach(),
+            "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
+            "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+        }
+
+    def branch_specific_structure_reliability_weight(
+            self, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, reference):
+        """空间 branch 使用结构可靠性，光谱 branch 仅使用像素观测可靠性。"""
+        lr_error = torch.mean(torch.abs(output_lrhsi.detach() - lr_hsi), dim=1, keepdim=True)
+        lr_error_hr = F.interpolate(
+            lr_error,
+            size=reference.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        ms_error = torch.mean(torch.abs(output_hrmsi.detach() - hr_msi), dim=1, keepdim=True)
+        pixel_error = 0.5 * (
+            self._normalize_observation_error(lr_error_hr)
+            + self._normalize_observation_error(ms_error)
+        )
+
+        lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
+        lr_structure_hr = F.interpolate(
+            lr_structure,
+            size=reference.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        ms_structure = self._sobel_error(output_hrmsi, hr_msi)
+        structure_error = 0.5 * (
+            self._normalize_observation_error(lr_structure_hr)
+            + self._normalize_observation_error(ms_structure)
+        )
+
+        spatial_weight = self._observation_error_to_reliability(pixel_error + structure_error)
+        spectral_weight = self._observation_error_to_reliability(pixel_error)
+        combined_weight = 0.5 * (spatial_weight + spectral_weight)
+
+        return spatial_weight, spectral_weight, {
+            "reliability_weight_mean": combined_weight.mean().detach(),
+            "reliability_weight_min": combined_weight.amin().detach(),
+            "reliability_weight_max": combined_weight.amax().detach(),
+            "spatial_reliability_weight_mean": spatial_weight.mean().detach(),
+            "spatial_reliability_weight_min": spatial_weight.amin().detach(),
+            "spatial_reliability_weight_max": spatial_weight.amax().detach(),
+            "spectral_reliability_weight_mean": spectral_weight.mean().detach(),
+            "spectral_reliability_weight_min": spectral_weight.amin().detach(),
+            "spectral_reliability_weight_max": spectral_weight.amax().detach(),
             "obs_lr_error_mean": lr_error_hr.mean().detach(),
             "obs_ms_error_mean": ms_error.mean().detach(),
             "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
@@ -1861,6 +1913,17 @@ class DualLearningLoss(nn.Module):
                     self.cross_observation_reliability_weight(
                         reconstructed_hr_spatial,
                         reconstructed_hr_spectral,
+                        lr_hsi,
+                        hr_msi,
+                        target_hrhsi,
+                    )
+                )
+                reliability_weight = 0.5 * (spatial_reliability_weight + spectral_reliability_weight)
+            elif self.cycle_reliability_mode == "branch_specific_structure":
+                spatial_reliability_weight, spectral_reliability_weight, reliability_items = (
+                    self.branch_specific_structure_reliability_weight(
+                        output_lrhsi,
+                        output_hrmsi,
                         lr_hsi,
                         hr_msi,
                         target_hrhsi,
