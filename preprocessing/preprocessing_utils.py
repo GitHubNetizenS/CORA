@@ -1420,6 +1420,8 @@ class DualLearningLoss(nn.Module):
                  observation_target_correction_eta=0.05,
                  observation_target_correction_clamp=True,
                  spectral_pullback_learnable=True,
+                 beta_spatial_bp=0.0,
+                 beta_spectral_bp=0.0,
                  pullback_mode="legacy"):
         super().__init__()
         response = torch.from_numpy(R).float()
@@ -1437,6 +1439,7 @@ class DualLearningLoss(nn.Module):
             "dual_pullback_fixed_legacy_spatial_v1",
             "dual_pullback_constrained_kernel_v1",
             "dual_pullback_psf_matched_v1",
+            "dual_pullback_observation_bp_v1",
         )
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
@@ -1502,6 +1505,12 @@ class DualLearningLoss(nn.Module):
             if self.spectral_pullback_learnable:
                 self.spectral_pullback = LearnableSpectralPullback(response)
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_observation_bp_v1":
+            self.upsample_blur = UpsampleBlur(scale_factor=downsample_factor, channels=response.shape[1])
+            self.upsample_blur.blur_kernel.requires_grad_(False)
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
         else:
             raise ValueError(f"Unsupported pullback_mode: {pullback_mode}")
 
@@ -1529,6 +1538,8 @@ class DualLearningLoss(nn.Module):
         self.observation_target_correction_enable = bool(observation_target_correction_enable)
         self.observation_target_correction_eta = float(observation_target_correction_eta)
         self.observation_target_correction_clamp = bool(observation_target_correction_clamp)
+        self.register_buffer("beta_spatial_bp", torch.tensor(beta_spatial_bp, dtype=torch.float32))
+        self.register_buffer("beta_spectral_bp", torch.tensor(beta_spectral_bp, dtype=torch.float32))
         self.loss_func = nn.L1Loss(reduction="mean")
 
     def get_global_loss_weights(self):
@@ -1572,6 +1583,8 @@ class DualLearningLoss(nn.Module):
             "target_corr_shift_mean": reference.new_tensor(0.0),
             "target_corr_shift_max": reference.new_tensor(0.0),
             "target_corr_eta": reference.new_tensor(0.0),
+            "bp_spatial_delta_mean": reference.new_tensor(0.0),
+            "bp_spectral_delta_mean": reference.new_tensor(0.0),
         }
 
     def _normalize_observation_error(self, error):
@@ -1869,6 +1882,35 @@ class DualLearningLoss(nn.Module):
             "target_corr_eta": eta_tensor.detach(),
         }
 
+    def observation_backprojection_pullback(self, spatial_hr, spectral_hr, lr_hsi, hr_msi):
+        """Use observation-domain residuals to lightly correct pullback outputs."""
+        zero = spatial_hr.new_tensor(0.0)
+        if self.pullback_mode != "dual_pullback_observation_bp_v1":
+            return spatial_hr, spectral_hr, {
+                "bp_spatial_delta_mean": zero,
+                "bp_spectral_delta_mean": zero,
+            }
+
+        spatial_delta = zero
+        spectral_delta = zero
+
+        if self.beta_spatial_bp.detach().abs().item() > 0:
+            lr_reprojected = self.reliability_spatial_down(spatial_hr)
+            lr_residual = lr_hsi - lr_reprojected
+            spatial_delta = self.upsample_blur(lr_residual)
+            spatial_hr = spatial_hr + self.beta_spatial_bp * spatial_delta
+
+        if self.beta_spectral_bp.detach().abs().item() > 0:
+            ms_reprojected = spectral_transform(spectral_hr, self.R, inverse=False)
+            ms_residual = hr_msi - ms_reprojected
+            spectral_delta = spectral_transform(ms_residual, self.R, inverse=True)
+            spectral_hr = spectral_hr + self.beta_spectral_bp * spectral_delta
+
+        return spatial_hr, spectral_hr, {
+            "bp_spatial_delta_mean": torch.abs(spatial_delta).mean().detach(),
+            "bp_spectral_delta_mean": torch.abs(spectral_delta).mean().detach(),
+        }
+
     def forward(self, output_hrhsi, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, compute_jac=True):
         # Previous min-softmax weights and DDL L1 consistency are excluded to
         # avoid duplicating the base degradation consistency loss.
@@ -1897,6 +1939,10 @@ class DualLearningLoss(nn.Module):
             lr_hsi,
             hr_msi,
         )
+        backprojection_items = {
+            "bp_spatial_delta_mean": zero,
+            "bp_spectral_delta_mean": zero,
+        }
 
         if self.use_dual_pullback_fusion:
             reconstructed_hr_spatial = self.upsample_blur(output_lrhsi)
@@ -1904,6 +1950,14 @@ class DualLearningLoss(nn.Module):
                 reconstructed_hr_spectral = spectral_transform(output_hrmsi, self.R, inverse=True)
             else:
                 reconstructed_hr_spectral = self.spectral_pullback(output_hrmsi)
+            reconstructed_hr_spatial, reconstructed_hr_spectral, backprojection_items = (
+                self.observation_backprojection_pullback(
+                    reconstructed_hr_spatial,
+                    reconstructed_hr_spectral,
+                    lr_hsi,
+                    hr_msi,
+                )
+            )
             lambda_cycle_spatial, lambda_cycle_spectral, lambda_cycle_fused, lambda_jac_spatial, lambda_jac_spectral = (
                 self.get_cycle_jac_lambdas()
             )
@@ -2059,6 +2113,8 @@ class DualLearningLoss(nn.Module):
             "target_corr_shift_mean": target_corr_items["target_corr_shift_mean"],
             "target_corr_shift_max": target_corr_items["target_corr_shift_max"],
             "target_corr_eta": target_corr_items["target_corr_eta"],
+            "bp_spatial_delta_mean": backprojection_items["bp_spatial_delta_mean"],
+            "bp_spectral_delta_mean": backprojection_items["bp_spectral_delta_mean"],
         }
 
         return loss_ddl, loss_items

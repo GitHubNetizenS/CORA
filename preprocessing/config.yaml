@@ -57,9 +57,10 @@ CAVE:
     # experiment_name: 031_seed43_base_no_ddl
     # experiment_name: 033_seed42_structure_ob_rely
     # experiment_name: 037_seed43_structure_ob_rely
-    experiment_name: 038_seed42_branch_specific_structure_reliability
+    # experiment_name: 038_seed42_branch_specific_structure_reliability
+    experiment_name: 039_seed42_observation_backprojection_pullback
     legacy_cycle_only_log: false
-    pullback_mode: dual_pullback_fixed_legacy_spatial_v1
+    pullback_mode: dual_pullback_observation_bp_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
     # 015：沿用 013 结构，将两个 branch cycle 权重从 0.001 提高到 0.002。
     # lambda_cycle_spatial: 0.002
@@ -86,7 +87,7 @@ CAVE:
     cycle_schedule_final_scale: 0.3
     # 038：空间 branch 使用像素+Sobel结构可靠性，光谱 branch 仅使用像素观测可靠性。
     cycle_reliability_enable: true
-    cycle_reliability_mode: branch_specific_structure
+    cycle_reliability_mode: structure_observation
     cycle_reliability_tau: 2.0
     cycle_reliability_min: 0.2
     cycle_reliability_normalize: true
@@ -96,6 +97,8 @@ CAVE:
     observation_target_correction_enable: false
     observation_target_correction_eta: 0.05
     observation_target_correction_clamp: true
+    beta_spatial_bp: 0.1
+    beta_spectral_bp: 0.1
   test:
     test_epoch: 50
     test_stride: 32

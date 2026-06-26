@@ -223,6 +223,8 @@ if "__main__"==__name__:
     observation_target_correction_eta = float(cfg["train"].get("observation_target_correction_eta", 0.05))
     observation_target_correction_clamp = bool(cfg["train"].get("observation_target_correction_clamp", True))
     spectral_pullback_learnable = bool(cfg["train"].get("spectral_pullback_learnable", True))
+    beta_spatial_bp = float(cfg["train"].get("beta_spatial_bp", 0.0))
+    beta_spectral_bp = float(cfg["train"].get("beta_spectral_bp", 0.0))
     cycle_schedule_cfg = {
         "enabled": bool(cfg["train"].get("cycle_schedule_enable", False)),
         "warmup_epoch": int(cfg["train"].get("cycle_schedule_warmup_epoch", 100)),
@@ -334,7 +336,8 @@ if "__main__"==__name__:
                                        "obs_lr_error_mean", "obs_ms_error_mean",
                                        "cross_spatial_ms_error_mean", "cross_spectral_lr_error_mean",
                                        "target_corr_delta_spatial_mean", "target_corr_delta_spectral_mean",
-                                       "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta"])
+                                       "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta",
+                                       "bp_spatial_delta_mean", "bp_spectral_delta_mean"])
         df.to_csv(excel_path, index=False)
     # ===========================================================================================
     # 1. 构造训练数据集和 DataLoader。
@@ -375,6 +378,8 @@ if "__main__"==__name__:
                                      observation_target_correction_eta=observation_target_correction_eta,
                                      observation_target_correction_clamp=observation_target_correction_clamp,
                                      spectral_pullback_learnable=spectral_pullback_learnable,
+                                     beta_spatial_bp=beta_spatial_bp,
+                                     beta_spectral_bp=beta_spectral_bp,
                                      pullback_mode=pullback_mode).cuda()
         optimizer_parameters += list(dual_loss.parameters())
     optimizer = torch.optim.Adam(optimizer_parameters,
@@ -688,7 +693,9 @@ if "__main__"==__name__:
                             loss_ddl_items["target_corr_delta_spectral_mean"].item(),
                             loss_ddl_items["target_corr_shift_mean"].item(),
                             loss_ddl_items["target_corr_shift_max"].item(),
-                            loss_ddl_items["target_corr_eta"].item()]
+                            loss_ddl_items["target_corr_eta"].item(),
+                            loss_ddl_items["bp_spatial_delta_mean"].item(),
+                            loss_ddl_items["bp_spectral_delta_mean"].item()]
             val_data = pd.DataFrame([val_list])
 
             val_data.to_csv(excel_path, mode='a', header=False, index=False)
