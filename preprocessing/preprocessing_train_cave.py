@@ -225,6 +225,7 @@ if "__main__"==__name__:
     spectral_pullback_learnable = bool(cfg["train"].get("spectral_pullback_learnable", True))
     beta_spatial_bp = float(cfg["train"].get("beta_spatial_bp", 0.0))
     beta_spectral_bp = float(cfg["train"].get("beta_spectral_bp", 0.0))
+    observation_backprojection_detach = bool(cfg["train"].get("observation_backprojection_detach", False))
     cycle_schedule_cfg = {
         "enabled": bool(cfg["train"].get("cycle_schedule_enable", False)),
         "warmup_epoch": int(cfg["train"].get("cycle_schedule_warmup_epoch", 100)),
@@ -380,6 +381,7 @@ if "__main__"==__name__:
                                      spectral_pullback_learnable=spectral_pullback_learnable,
                                      beta_spatial_bp=beta_spatial_bp,
                                      beta_spectral_bp=beta_spectral_bp,
+                                     observation_backprojection_detach=observation_backprojection_detach,
                                      pullback_mode=pullback_mode).cuda()
         optimizer_parameters += list(dual_loss.parameters())
     optimizer = torch.optim.Adam(optimizer_parameters,

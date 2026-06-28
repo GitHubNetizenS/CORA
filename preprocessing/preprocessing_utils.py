@@ -1422,6 +1422,7 @@ class DualLearningLoss(nn.Module):
                  spectral_pullback_learnable=True,
                  beta_spatial_bp=0.0,
                  beta_spectral_bp=0.0,
+                 observation_backprojection_detach=False,
                  pullback_mode="legacy"):
         super().__init__()
         response = torch.from_numpy(R).float()
@@ -1540,6 +1541,7 @@ class DualLearningLoss(nn.Module):
         self.observation_target_correction_clamp = bool(observation_target_correction_clamp)
         self.register_buffer("beta_spatial_bp", torch.tensor(beta_spatial_bp, dtype=torch.float32))
         self.register_buffer("beta_spectral_bp", torch.tensor(beta_spectral_bp, dtype=torch.float32))
+        self.observation_backprojection_detach = bool(observation_backprojection_detach)
         self.loss_func = nn.L1Loss(reduction="mean")
 
     def get_global_loss_weights(self):
@@ -1895,13 +1897,15 @@ class DualLearningLoss(nn.Module):
         spectral_delta = zero
 
         if self.beta_spatial_bp.detach().abs().item() > 0:
-            lr_reprojected = self.reliability_spatial_down(spatial_hr)
+            spatial_source = spatial_hr.detach() if self.observation_backprojection_detach else spatial_hr
+            lr_reprojected = self.reliability_spatial_down(spatial_source)
             lr_residual = lr_hsi - lr_reprojected
             spatial_delta = self.upsample_blur(lr_residual)
             spatial_hr = spatial_hr + self.beta_spatial_bp * spatial_delta
 
         if self.beta_spectral_bp.detach().abs().item() > 0:
-            ms_reprojected = spectral_transform(spectral_hr, self.R, inverse=False)
+            spectral_source = spectral_hr.detach() if self.observation_backprojection_detach else spectral_hr
+            ms_reprojected = spectral_transform(spectral_source, self.R, inverse=False)
             ms_residual = hr_msi - ms_reprojected
             spectral_delta = spectral_transform(ms_residual, self.R, inverse=True)
             spectral_hr = spectral_hr + self.beta_spectral_bp * spectral_delta
