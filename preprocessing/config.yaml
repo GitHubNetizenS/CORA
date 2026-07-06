@@ -59,7 +59,8 @@ CAVE:
     # experiment_name: 037_seed43_structure_ob_rely
     # experiment_name: 038_seed42_branch_specific_structure_reliability
     # experiment_name: 039_seed42_observation_backprojection_pullback
-    experiment_name: 040_seed42_detached_observation_backprojection
+    # experiment_name: 040_seed42_detached_observation_backprojection
+    experiment_name: 041_seed42_spectral_only_observation_backprojection
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_observation_bp_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -99,7 +100,7 @@ CAVE:
     observation_target_correction_eta: 0.05
     observation_target_correction_clamp: true
     observation_backprojection_detach: true
-    beta_spatial_bp: 0.05
+    beta_spatial_bp: 0.0
     beta_spectral_bp: 0.05
   test:
     test_epoch: 50
