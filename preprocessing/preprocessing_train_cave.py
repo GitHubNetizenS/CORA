@@ -137,11 +137,16 @@ def make_zero_ddl_items(reference):
         "obs_ms_error_mean": zero,
         "cross_spatial_ms_error_mean": zero,
         "cross_spectral_lr_error_mean": zero,
+        "ob_rely_pixel_lr_weight": torch.tensor(0.5, device=device),
+        "ob_rely_structure_lr_weight": torch.tensor(0.5, device=device),
+        "ob_rely_pixel_structure_weight": torch.tensor(0.5, device=device),
         "target_corr_delta_spatial_mean": zero,
         "target_corr_delta_spectral_mean": zero,
         "target_corr_shift_mean": zero,
         "target_corr_shift_max": zero,
         "target_corr_eta": zero,
+        "bp_spatial_delta_mean": zero,
+        "bp_spectral_delta_mean": zero,
     }
 
 
@@ -336,6 +341,8 @@ if "__main__"==__name__:
                                        "spectral_reliability_weight_min", "spectral_reliability_weight_max",
                                        "obs_lr_error_mean", "obs_ms_error_mean",
                                        "cross_spatial_ms_error_mean", "cross_spectral_lr_error_mean",
+                                       "ob_rely_pixel_lr_weight", "ob_rely_structure_lr_weight",
+                                       "ob_rely_pixel_structure_weight",
                                        "target_corr_delta_spatial_mean", "target_corr_delta_spectral_mean",
                                        "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta",
                                        "bp_spatial_delta_mean", "bp_spectral_delta_mean"])
@@ -691,6 +698,9 @@ if "__main__"==__name__:
                             loss_ddl_items["obs_ms_error_mean"].item(),
                             loss_ddl_items["cross_spatial_ms_error_mean"].item(),
                             loss_ddl_items["cross_spectral_lr_error_mean"].item(),
+                            loss_ddl_items["ob_rely_pixel_lr_weight"].item(),
+                            loss_ddl_items["ob_rely_structure_lr_weight"].item(),
+                            loss_ddl_items["ob_rely_pixel_structure_weight"].item(),
                             loss_ddl_items["target_corr_delta_spatial_mean"].item(),
                             loss_ddl_items["target_corr_delta_spectral_mean"].item(),
                             loss_ddl_items["target_corr_shift_mean"].item(),

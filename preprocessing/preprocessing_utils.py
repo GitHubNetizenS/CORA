@@ -1536,6 +1536,11 @@ class DualLearningLoss(nn.Module):
         self.cycle_reliability_min = float(cycle_reliability_min)
         self.cycle_reliability_normalize = bool(cycle_reliability_normalize)
         self.cycle_reliability_apply_to_branches = bool(cycle_reliability_apply_to_branches)
+        self.reliability_mix_min = 0.25
+        self.reliability_mix_max = 0.75
+        self.raw_reliability_pixel_lr_weight = nn.Parameter(torch.zeros(()))
+        self.raw_reliability_structure_lr_weight = nn.Parameter(torch.zeros(()))
+        self.raw_reliability_pixel_structure_weight = nn.Parameter(torch.zeros(()))
         self.observation_target_correction_enable = bool(observation_target_correction_enable)
         self.observation_target_correction_eta = float(observation_target_correction_eta)
         self.observation_target_correction_clamp = bool(observation_target_correction_clamp)
@@ -1587,7 +1592,22 @@ class DualLearningLoss(nn.Module):
             "target_corr_eta": reference.new_tensor(0.0),
             "bp_spatial_delta_mean": reference.new_tensor(0.0),
             "bp_spectral_delta_mean": reference.new_tensor(0.0),
+            "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
         }
+
+    def _bounded_reliability_mix(self, raw_weight):
+        return self.reliability_mix_min + (
+            self.reliability_mix_max - self.reliability_mix_min
+        ) * torch.sigmoid(raw_weight)
+
+    def get_reliability_mix_weights(self):
+        return (
+            self._bounded_reliability_mix(self.raw_reliability_pixel_lr_weight),
+            self._bounded_reliability_mix(self.raw_reliability_structure_lr_weight),
+            self._bounded_reliability_mix(self.raw_reliability_pixel_structure_weight),
+        )
 
     def _normalize_observation_error(self, error):
         eps = 1e-6
@@ -1633,7 +1653,7 @@ class DualLearningLoss(nn.Module):
         error = torch.abs(pred_lh - target_lh) + torch.abs(pred_hl - target_hl) + torch.abs(pred_hh - target_hh)
         return error.mean(dim=1, keepdim=True)
 
-    def _observation_error_to_reliability(self, observation_error):
+    def _observation_error_to_reliability(self, observation_error, detach_result=True):
         eps = 1e-6
         reliability = torch.exp(-self.cycle_reliability_tau * observation_error)
         reliability = self.cycle_reliability_min + (1.0 - self.cycle_reliability_min) * reliability
@@ -1641,7 +1661,9 @@ class DualLearningLoss(nn.Module):
         if self.cycle_reliability_normalize:
             reliability = reliability / (reliability.detach().mean(dim=(2, 3), keepdim=True) + eps)
 
-        return reliability.detach()
+        if detach_result:
+            return reliability.detach()
+        return reliability
 
     def observation_reliability_weight(self, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, reference):
         """根据真实观测域残差估计 cycle target 的可靠性权重。"""
@@ -1661,6 +1683,9 @@ class DualLearningLoss(nn.Module):
                 "obs_ms_error_mean": reference.new_tensor(0.0),
                 "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
                 "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+                "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
             }
 
         lr_error = torch.mean(torch.abs(output_lrhsi.detach() - lr_hsi), dim=1, keepdim=True)
@@ -1674,7 +1699,9 @@ class DualLearningLoss(nn.Module):
 
         lr_error_for_weight = self._normalize_observation_error(lr_error_hr)
         ms_error_for_weight = self._normalize_observation_error(ms_error)
-        observation_error = 0.5 * (lr_error_for_weight + ms_error_for_weight)
+        pixel_lr_weight, structure_lr_weight, pixel_structure_weight = self.get_reliability_mix_weights()
+        pixel_error = pixel_lr_weight * lr_error_for_weight + (1.0 - pixel_lr_weight) * ms_error_for_weight
+        observation_error = pixel_error
 
         if self.cycle_reliability_mode == "robust_observation":
             observation_error = self._robust_normalize_observation_error(observation_error)
@@ -1687,11 +1714,14 @@ class DualLearningLoss(nn.Module):
                 align_corners=False,
             )
             ms_structure = self._sobel_error(output_hrmsi, hr_msi)
-            structure_error = 0.5 * (
-                self._normalize_observation_error(lr_structure_hr)
-                + self._normalize_observation_error(ms_structure)
+            structure_error = (
+                structure_lr_weight * self._normalize_observation_error(lr_structure_hr)
+                + (1.0 - structure_lr_weight) * self._normalize_observation_error(ms_structure)
             )
-            observation_error = observation_error + structure_error
+            observation_error = 2.0 * (
+                pixel_structure_weight * pixel_error
+                + (1.0 - pixel_structure_weight) * structure_error
+            )
         elif self.cycle_reliability_mode == "frequency_observation":
             lr_hf = self._haar_error(output_lrhsi, lr_hsi)
             lr_hf_hr = F.interpolate(
@@ -1713,7 +1743,7 @@ class DualLearningLoss(nn.Module):
             )
             observation_error = observation_error + frequency_error
 
-        reliability = self._observation_error_to_reliability(observation_error)
+        reliability = self._observation_error_to_reliability(observation_error, detach_result=False)
         return reliability, {
             "reliability_weight_mean": reliability.mean().detach(),
             "reliability_weight_min": reliability.amin().detach(),
@@ -1728,6 +1758,9 @@ class DualLearningLoss(nn.Module):
             "obs_ms_error_mean": ms_error.mean().detach(),
             "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
             "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+            "ob_rely_pixel_lr_weight": pixel_lr_weight.detach(),
+            "ob_rely_structure_lr_weight": structure_lr_weight.detach(),
+            "ob_rely_pixel_structure_weight": pixel_structure_weight.detach(),
         }
 
     def branch_specific_structure_reliability_weight(
@@ -1777,6 +1810,9 @@ class DualLearningLoss(nn.Module):
             "obs_ms_error_mean": ms_error.mean().detach(),
             "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
             "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+            "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
         }
 
     def _reliability_from_error(self, error):
@@ -1813,6 +1849,9 @@ class DualLearningLoss(nn.Module):
                 "obs_ms_error_mean": reference.new_tensor(0.0),
                 "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
                 "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+                "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
             }
 
         spatial_hrmsi = spectral_transform(reconstructed_hr_spatial.detach(), self.R, inverse=False)
@@ -1845,6 +1884,9 @@ class DualLearningLoss(nn.Module):
             "obs_ms_error_mean": reference.new_tensor(0.0),
             "cross_spatial_ms_error_mean": spatial_ms_error.mean().detach(),
             "cross_spectral_lr_error_mean": spectral_lr_error_hr.mean().detach(),
+            "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
         }
 
     def observation_target_correction(self, target_hrhsi, output_lrhsi, output_hrmsi, lr_hsi, hr_msi):
@@ -2112,6 +2154,9 @@ class DualLearningLoss(nn.Module):
             "obs_ms_error_mean": reliability_items["obs_ms_error_mean"],
             "cross_spatial_ms_error_mean": reliability_items["cross_spatial_ms_error_mean"],
             "cross_spectral_lr_error_mean": reliability_items["cross_spectral_lr_error_mean"],
+            "ob_rely_pixel_lr_weight": reliability_items["ob_rely_pixel_lr_weight"],
+            "ob_rely_structure_lr_weight": reliability_items["ob_rely_structure_lr_weight"],
+            "ob_rely_pixel_structure_weight": reliability_items["ob_rely_pixel_structure_weight"],
             "target_corr_delta_spatial_mean": target_corr_items["target_corr_delta_spatial_mean"],
             "target_corr_delta_spectral_mean": target_corr_items["target_corr_delta_spectral_mean"],
             "target_corr_shift_mean": target_corr_items["target_corr_shift_mean"],
