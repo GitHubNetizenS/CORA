@@ -140,9 +140,6 @@ def make_zero_ddl_items(reference):
         "ob_rely_pixel_lr_weight": torch.tensor(0.5, device=device),
         "ob_rely_structure_lr_weight": torch.tensor(0.5, device=device),
         "ob_rely_pixel_structure_weight": torch.tensor(0.5, device=device),
-        "pullback_scale_3x3_mean": zero,
-        "pullback_scale_5x5_mean": zero,
-        "pullback_scale_7x7_mean": zero,
         "target_corr_delta_spatial_mean": zero,
         "target_corr_delta_spectral_mean": zero,
         "target_corr_shift_mean": zero,
@@ -227,7 +224,6 @@ if "__main__"==__name__:
     cycle_reliability_min = float(cfg["train"].get("cycle_reliability_min", 0.2))
     cycle_reliability_normalize = bool(cfg["train"].get("cycle_reliability_normalize", True))
     cycle_reliability_apply_to_branches = bool(cfg["train"].get("cycle_reliability_apply_to_branches", False))
-    cycle_reliability_learnable_mix = bool(cfg["train"].get("cycle_reliability_learnable_mix", False))
     observation_target_correction_enable = bool(cfg["train"].get("observation_target_correction_enable", False))
     observation_target_correction_eta = float(cfg["train"].get("observation_target_correction_eta", 0.05))
     observation_target_correction_clamp = bool(cfg["train"].get("observation_target_correction_clamp", True))
@@ -347,8 +343,6 @@ if "__main__"==__name__:
                                        "cross_spatial_ms_error_mean", "cross_spectral_lr_error_mean",
                                        "ob_rely_pixel_lr_weight", "ob_rely_structure_lr_weight",
                                        "ob_rely_pixel_structure_weight",
-                                       "pullback_scale_3x3_mean", "pullback_scale_5x5_mean",
-                                       "pullback_scale_7x7_mean",
                                        "target_corr_delta_spatial_mean", "target_corr_delta_spectral_mean",
                                        "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta",
                                        "bp_spatial_delta_mean", "bp_spectral_delta_mean"])
@@ -388,7 +382,6 @@ if "__main__"==__name__:
                                      cycle_reliability_min=cycle_reliability_min,
                                      cycle_reliability_normalize=cycle_reliability_normalize,
                                      cycle_reliability_apply_to_branches=cycle_reliability_apply_to_branches,
-                                     cycle_reliability_learnable_mix=cycle_reliability_learnable_mix,
                                      observation_target_correction_enable=observation_target_correction_enable,
                                      observation_target_correction_eta=observation_target_correction_eta,
                                      observation_target_correction_clamp=observation_target_correction_clamp,
@@ -708,9 +701,6 @@ if "__main__"==__name__:
                             loss_ddl_items["ob_rely_pixel_lr_weight"].item(),
                             loss_ddl_items["ob_rely_structure_lr_weight"].item(),
                             loss_ddl_items["ob_rely_pixel_structure_weight"].item(),
-                            loss_ddl_items["pullback_scale_3x3_mean"].item(),
-                            loss_ddl_items["pullback_scale_5x5_mean"].item(),
-                            loss_ddl_items["pullback_scale_7x7_mean"].item(),
                             loss_ddl_items["target_corr_delta_spatial_mean"].item(),
                             loss_ddl_items["target_corr_delta_spectral_mean"].item(),
                             loss_ddl_items["target_corr_shift_mean"].item(),
