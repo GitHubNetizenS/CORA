@@ -140,6 +140,10 @@ def make_zero_ddl_items(reference):
         "ob_rely_pixel_lr_weight": torch.tensor(0.5, device=device),
         "ob_rely_structure_lr_weight": torch.tensor(0.5, device=device),
         "ob_rely_pixel_structure_weight": torch.tensor(0.5, device=device),
+        "output_refine_scale_3x3_mean": zero,
+        "output_refine_scale_5x5_mean": zero,
+        "output_refine_scale_7x7_mean": zero,
+        "output_refine_residual_abs_mean": zero,
         "target_corr_delta_spatial_mean": zero,
         "target_corr_delta_spectral_mean": zero,
         "target_corr_shift_mean": zero,
@@ -224,6 +228,8 @@ if "__main__"==__name__:
     cycle_reliability_min = float(cfg["train"].get("cycle_reliability_min", 0.2))
     cycle_reliability_normalize = bool(cfg["train"].get("cycle_reliability_normalize", True))
     cycle_reliability_apply_to_branches = bool(cfg["train"].get("cycle_reliability_apply_to_branches", False))
+    cycle_reliability_learnable_mix = bool(cfg["train"].get("cycle_reliability_learnable_mix", False))
+    output_refinement_enable = bool(cfg["train"].get("output_refinement_enable", False))
     observation_target_correction_enable = bool(cfg["train"].get("observation_target_correction_enable", False))
     observation_target_correction_eta = float(cfg["train"].get("observation_target_correction_eta", 0.05))
     observation_target_correction_clamp = bool(cfg["train"].get("observation_target_correction_clamp", True))
@@ -343,6 +349,8 @@ if "__main__"==__name__:
                                        "cross_spatial_ms_error_mean", "cross_spectral_lr_error_mean",
                                        "ob_rely_pixel_lr_weight", "ob_rely_structure_lr_weight",
                                        "ob_rely_pixel_structure_weight",
+                                       "output_refine_scale_3x3_mean", "output_refine_scale_5x5_mean",
+                                       "output_refine_scale_7x7_mean", "output_refine_residual_abs_mean",
                                        "target_corr_delta_spatial_mean", "target_corr_delta_spectral_mean",
                                        "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta",
                                        "bp_spatial_delta_mean", "bp_spectral_delta_mean"])
@@ -382,6 +390,8 @@ if "__main__"==__name__:
                                      cycle_reliability_min=cycle_reliability_min,
                                      cycle_reliability_normalize=cycle_reliability_normalize,
                                      cycle_reliability_apply_to_branches=cycle_reliability_apply_to_branches,
+                                     cycle_reliability_learnable_mix=cycle_reliability_learnable_mix,
+                                     output_refinement_enable=output_refinement_enable,
                                      observation_target_correction_enable=observation_target_correction_enable,
                                      observation_target_correction_eta=observation_target_correction_eta,
                                      observation_target_correction_clamp=observation_target_correction_clamp,
@@ -432,6 +442,8 @@ if "__main__"==__name__:
     # 开始训练主循环。
     for epoch in range(start_epoch+1, end_epoch+1, 1):
         model.train()
+        if dual_loss is not None:
+            dual_loss.train()
         cycle_schedule_scale = apply_cycle_schedule(
             dual_loss,
             epoch,
@@ -455,6 +467,8 @@ if "__main__"==__name__:
             # ===========================================================================================
             # 前向传播：AMSF 输出 HRHSI 预测结果以及边缘分支特征。
             output_hrhsi, spat_edge1, spat_edge2, spec_edge = model(lr_hsi, hr_msi)
+            if dual_loss is not None:
+                output_hrhsi = dual_loss.refine_hrhsi(output_hrhsi)
 
             # 只有基础退化一致性或 DDL 启用时，才需要计算空间退化结果。
             need_output_lrhsi = use_base_degradation_consistency or (dual_loss is not None)
@@ -583,6 +597,8 @@ if "__main__"==__name__:
         # 按 val_interval 间隔执行验证；第 1 轮也会验证一次用于观察初始状态。
         if ((0==epoch%val_interval) and (epoch>=test_epoch)) or 1==epoch:
             model.eval()
+            if dual_loss is not None:
+                dual_loss.eval()
 
             val_loss_meter = AverageMeter()
             SAM = Loss_SAM()
@@ -615,7 +631,10 @@ if "__main__"==__name__:
                     MSI_HR = torch.Tensor(MSI_HR_np).unsqueeze(0).cuda()
                     prediction, val_loss_meter = reconstruction(model, R, HSI_LR, MSI_HR, HRHSI_gt,
                                                                 downsample_factor, training_size, test_stride,
-                                                                val_loss_meter)
+                                                                val_loss_meter,
+                                                                output_refiner=(
+                                                                    dual_loss.refine_hrhsi if dual_loss is not None else None
+                                                                ))
                     # 转为 HWC 格式，用于 SAM 等 numpy 指标。
                     pred_np = prediction.squeeze(0).cpu().numpy().transpose(1, 2, 0)
                     gt_np = HRHSI.cpu().numpy().transpose(1, 2, 0)
@@ -701,6 +720,10 @@ if "__main__"==__name__:
                             loss_ddl_items["ob_rely_pixel_lr_weight"].item(),
                             loss_ddl_items["ob_rely_structure_lr_weight"].item(),
                             loss_ddl_items["ob_rely_pixel_structure_weight"].item(),
+                            loss_ddl_items["output_refine_scale_3x3_mean"].item(),
+                            loss_ddl_items["output_refine_scale_5x5_mean"].item(),
+                            loss_ddl_items["output_refine_scale_7x7_mean"].item(),
+                            loss_ddl_items["output_refine_residual_abs_mean"].item(),
                             loss_ddl_items["target_corr_delta_spatial_mean"].item(),
                             loss_ddl_items["target_corr_delta_spectral_mean"].item(),
                             loss_ddl_items["target_corr_shift_mean"].item(),

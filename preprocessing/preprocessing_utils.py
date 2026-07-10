@@ -256,7 +256,8 @@ training_size       模型输入块的尺寸
 stride              滑动窗口的步长
 val_loss            所有预测块的损失值
 """
-def reconstruction(net2, R, HSI_LR, MSI_HR, HSI_HR, downsample_factor, training_size, stride, val_loss):
+def reconstruction(net2, R, HSI_LR, MSI_HR, HSI_HR, downsample_factor, training_size, stride, val_loss,
+                   output_refiner=None):
     # 创建index_matrix和abundance_t两个张量，尺寸都为“C×H×W”。
     # index_matrix用于记录每个像素被覆盖的次数，abundance_t用于累加每个像素的预测值。
     device = MSI_HR.device
@@ -295,6 +296,8 @@ def reconstruction(net2, R, HSI_LR, MSI_HR, HSI_HR, downsample_factor, training_
                 # 禁用梯度计算。
                 # out的尺寸为“1×C×training_size×training_size”，为预测的HRHSI片段。
                 out, _, _, _ = net2(temp_lrhs, temp_hrms)
+                if output_refiner is not None:
+                    out = output_refiner(out)
                 # 将预测的HRHSI片段与真实的HRHSI片段比较。
                 loss_temp = loss_func_re(out, temp_hrhs)
 
@@ -1401,6 +1404,49 @@ class RemoteSensingDualPullbackFusion(nn.Module):
         return fused_hr, fusion_items
 
 
+class MultiScaleOutputRefinement(nn.Module):
+    """Lightweight multi-scale residual refinement for the initial HRHSI."""
+    def __init__(self, channels):
+        super().__init__()
+        self.residual_scale = 0.05
+        self.branch_3x3 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels)
+        self.branch_5x5 = nn.Conv2d(channels, channels, kernel_size=5, padding=2, groups=channels)
+        self.branch_7x7 = nn.Conv2d(channels, channels, kernel_size=7, padding=3, groups=channels)
+        self.scale_attention = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(8, 3, kernel_size=1),
+        )
+        self.residual_projection = nn.Conv2d(channels, channels, kernel_size=1, groups=channels)
+        nn.init.zeros_(self.residual_projection.weight)
+        nn.init.zeros_(self.residual_projection.bias)
+        self.last_scale_weights = None
+        self.last_residual_abs_mean = None
+
+    def forward(self, x):
+        local = F.gelu(self.branch_3x3(x))
+        medium = F.avg_pool2d(x, kernel_size=2, stride=2)
+        medium = F.gelu(self.branch_5x5(medium))
+        medium = F.interpolate(medium, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        global_feat = F.avg_pool2d(x, kernel_size=4, stride=4)
+        global_feat = F.gelu(self.branch_7x7(global_feat))
+        global_feat = F.interpolate(global_feat, size=x.shape[-2:], mode="bilinear", align_corners=False)
+
+        scale_weights = torch.softmax(
+            self.scale_attention(x.mean(dim=1, keepdim=True)), dim=1
+        )
+        multi_scale_feature = (
+            scale_weights[:, 0:1] * local
+            + scale_weights[:, 1:2] * medium
+            + scale_weights[:, 2:3] * global_feat
+        )
+        residual = self.residual_projection(multi_scale_feature)
+        refined = x + self.residual_scale * torch.tanh(residual)
+        self.last_scale_weights = scale_weights.detach()
+        self.last_residual_abs_mean = residual.detach().abs().mean()
+        return refined
+
+
 class DualLearningLoss(nn.Module):
     """Dual learning loss with legacy modes and final dual-pullback AGF mode."""
     def __init__(self, R, downsample_factor=8,
@@ -1416,6 +1462,8 @@ class DualLearningLoss(nn.Module):
                  cycle_reliability_min=0.2,
                  cycle_reliability_normalize=True,
                  cycle_reliability_apply_to_branches=False,
+                 cycle_reliability_learnable_mix=False,
+                 output_refinement_enable=False,
                  observation_target_correction_enable=False,
                  observation_target_correction_eta=0.05,
                  observation_target_correction_clamp=True,
@@ -1445,6 +1493,10 @@ class DualLearningLoss(nn.Module):
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
         self.pullback_fusion = None
+        self.output_refinement_enable = bool(output_refinement_enable)
+        self.output_refiner = None
+        if self.output_refinement_enable:
+            self.output_refiner = MultiScaleOutputRefinement(response.shape[1])
 
         if pullback_mode == "legacy":
             self.upsample_blur = UpsampleBlur(scale_factor=downsample_factor, channels=response.shape[1])
@@ -1536,11 +1588,16 @@ class DualLearningLoss(nn.Module):
         self.cycle_reliability_min = float(cycle_reliability_min)
         self.cycle_reliability_normalize = bool(cycle_reliability_normalize)
         self.cycle_reliability_apply_to_branches = bool(cycle_reliability_apply_to_branches)
+        self.cycle_reliability_learnable_mix = bool(cycle_reliability_learnable_mix)
         self.reliability_mix_min = 0.25
         self.reliability_mix_max = 0.75
         self.raw_reliability_pixel_lr_weight = nn.Parameter(torch.zeros(()))
         self.raw_reliability_structure_lr_weight = nn.Parameter(torch.zeros(()))
         self.raw_reliability_pixel_structure_weight = nn.Parameter(torch.zeros(()))
+        if not self.cycle_reliability_learnable_mix:
+            self.raw_reliability_pixel_lr_weight.requires_grad_(False)
+            self.raw_reliability_structure_lr_weight.requires_grad_(False)
+            self.raw_reliability_pixel_structure_weight.requires_grad_(False)
         self.observation_target_correction_enable = bool(observation_target_correction_enable)
         self.observation_target_correction_eta = float(observation_target_correction_eta)
         self.observation_target_correction_clamp = bool(observation_target_correction_clamp)
@@ -1563,6 +1620,28 @@ class DualLearningLoss(nn.Module):
             self.lambda_jac_spatial,
             self.lambda_jac_spectral,
         )
+
+    def refine_hrhsi(self, initial_hrhsi):
+        if self.output_refiner is None:
+            return initial_hrhsi
+        return self.output_refiner(initial_hrhsi)
+
+    def get_output_refinement_items(self, reference):
+        zero = reference.new_tensor(0.0)
+        if self.output_refiner is None or self.output_refiner.last_scale_weights is None:
+            return {
+                "output_refine_scale_3x3_mean": zero,
+                "output_refine_scale_5x5_mean": zero,
+                "output_refine_scale_7x7_mean": zero,
+                "output_refine_residual_abs_mean": zero,
+            }
+        weights = self.output_refiner.last_scale_weights
+        return {
+            "output_refine_scale_3x3_mean": weights[:, 0:1].mean(),
+            "output_refine_scale_5x5_mean": weights[:, 1:2].mean(),
+            "output_refine_scale_7x7_mean": weights[:, 2:3].mean(),
+            "output_refine_residual_abs_mean": self.output_refiner.last_residual_abs_mean,
+        }
 
     @staticmethod
     def _zero_items(reference):
@@ -1595,6 +1674,10 @@ class DualLearningLoss(nn.Module):
             "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
             "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
             "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
+            "output_refine_scale_3x3_mean": reference.new_tensor(0.0),
+            "output_refine_scale_5x5_mean": reference.new_tensor(0.0),
+            "output_refine_scale_7x7_mean": reference.new_tensor(0.0),
+            "output_refine_residual_abs_mean": reference.new_tensor(0.0),
         }
 
     def _bounded_reliability_mix(self, raw_weight):
@@ -1603,6 +1686,9 @@ class DualLearningLoss(nn.Module):
         ) * torch.sigmoid(raw_weight)
 
     def get_reliability_mix_weights(self):
+        if not self.cycle_reliability_learnable_mix:
+            fixed_weight = self.raw_reliability_pixel_lr_weight.new_tensor(0.5)
+            return fixed_weight, fixed_weight, fixed_weight
         return (
             self._bounded_reliability_mix(self.raw_reliability_pixel_lr_weight),
             self._bounded_reliability_mix(self.raw_reliability_structure_lr_weight),
@@ -1962,6 +2048,7 @@ class DualLearningLoss(nn.Module):
         # avoid duplicating the base degradation consistency loss.
         target_hrhsi = output_hrhsi.detach()
         zero = output_hrhsi.new_tensor(0.0)
+        output_refinement_items = self.get_output_refinement_items(output_hrhsi)
         fusion_items = self._zero_items(output_hrhsi)
         reliability_items = {
             "reliability_weight_mean": output_hrhsi.new_tensor(1.0),
@@ -2157,6 +2244,10 @@ class DualLearningLoss(nn.Module):
             "ob_rely_pixel_lr_weight": reliability_items["ob_rely_pixel_lr_weight"],
             "ob_rely_structure_lr_weight": reliability_items["ob_rely_structure_lr_weight"],
             "ob_rely_pixel_structure_weight": reliability_items["ob_rely_pixel_structure_weight"],
+            "output_refine_scale_3x3_mean": output_refinement_items["output_refine_scale_3x3_mean"].detach(),
+            "output_refine_scale_5x5_mean": output_refinement_items["output_refine_scale_5x5_mean"].detach(),
+            "output_refine_scale_7x7_mean": output_refinement_items["output_refine_scale_7x7_mean"].detach(),
+            "output_refine_residual_abs_mean": output_refinement_items["output_refine_residual_abs_mean"].detach(),
             "target_corr_delta_spatial_mean": target_corr_items["target_corr_delta_spatial_mean"],
             "target_corr_delta_spectral_mean": target_corr_items["target_corr_delta_spectral_mean"],
             "target_corr_shift_mean": target_corr_items["target_corr_shift_mean"],
