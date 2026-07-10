@@ -1113,6 +1113,74 @@ class LearnableSpatialPullback(nn.Module):
         return blurred + residual
 
 
+class MultiScaleSelectiveSpatialRefinement(nn.Module):
+    """
+    Fixed physical upsample-blur pullback with a lightweight multi-receptive-
+    field residual refinement.
+
+    The 3x3, 5x5, and 7x7 depthwise branches retain per-band spatial filtering.
+    A shared spatial scale-selection attention chooses the useful receptive
+    field at each location, while a zero-initialized projection preserves the
+    legacy fixed UpsampleBlur output at initialization.
+    """
+    def __init__(self, blur_kernel=[1, 2, 1], scale_factor=8, channels=1):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.channels = channels
+        self.residual_scale = 0.05
+
+        kernel = torch.tensor(blur_kernel, dtype=torch.float32)
+        kernel = kernel / kernel.sum()
+        kernel = torch.outer(kernel, kernel)
+        self.register_buffer(
+            "blur_kernel",
+            kernel.unsqueeze(0).unsqueeze(0).repeat(channels, 1, 1, 1),
+        )
+
+        self.refine_3x3 = nn.Conv2d(
+            channels, channels, kernel_size=3, padding=1, groups=channels
+        )
+        self.refine_5x5 = nn.Conv2d(
+            channels, channels, kernel_size=5, padding=2, groups=channels
+        )
+        self.refine_7x7 = nn.Conv2d(
+            channels, channels, kernel_size=7, padding=3, groups=channels
+        )
+
+        # The scale attention is shared by all bands, avoiding arbitrary
+        # spectral mixing in the spatial pullback branch.
+        self.scale_attention = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(8, 3, kernel_size=1),
+        )
+        self.residual_projection = nn.Conv2d(
+            channels, channels, kernel_size=1, groups=channels
+        )
+        self.last_scale_weights = None
+        nn.init.zeros_(self.residual_projection.weight)
+        nn.init.zeros_(self.residual_projection.bias)
+
+    def forward(self, x):
+        x_up = F.interpolate(x, scale_factor=self.scale_factor, mode="bilinear", align_corners=False)
+        base = F.conv2d(x_up, weight=self.blur_kernel, padding=1, groups=self.channels)
+
+        features_3x3 = F.gelu(self.refine_3x3(base))
+        features_5x5 = F.gelu(self.refine_5x5(base))
+        features_7x7 = F.gelu(self.refine_7x7(base))
+        scale_weights = torch.softmax(
+            self.scale_attention(base.mean(dim=1, keepdim=True)), dim=1
+        )
+        self.last_scale_weights = scale_weights.detach()
+        refined = (
+            scale_weights[:, 0:1] * features_3x3
+            + scale_weights[:, 1:2] * features_5x5
+            + scale_weights[:, 2:3] * features_7x7
+        )
+        residual = self.residual_projection(refined)
+        return base + self.residual_scale * torch.tanh(residual)
+
+
 class DegradationEdgeAttentionSpatialPullback(nn.Module):
     """
     Degradation-edge guided spatial pullback.
@@ -1416,6 +1484,7 @@ class DualLearningLoss(nn.Module):
                  cycle_reliability_min=0.2,
                  cycle_reliability_normalize=True,
                  cycle_reliability_apply_to_branches=False,
+                 cycle_reliability_learnable_mix=False,
                  observation_target_correction_enable=False,
                  observation_target_correction_eta=0.05,
                  observation_target_correction_clamp=True,
@@ -1441,6 +1510,7 @@ class DualLearningLoss(nn.Module):
             "dual_pullback_constrained_kernel_v1",
             "dual_pullback_psf_matched_v1",
             "dual_pullback_observation_bp_v1",
+            "dual_pullback_multiscale_refine_v1",
         )
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
@@ -1512,6 +1582,14 @@ class DualLearningLoss(nn.Module):
             if self.spectral_pullback_learnable:
                 self.spectral_pullback = LearnableSpectralPullback(response)
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_multiscale_refine_v1":
+            self.upsample_blur = MultiScaleSelectiveSpatialRefinement(
+                scale_factor=downsample_factor,
+                channels=response.shape[1],
+            )
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
         else:
             raise ValueError(f"Unsupported pullback_mode: {pullback_mode}")
 
@@ -1536,11 +1614,16 @@ class DualLearningLoss(nn.Module):
         self.cycle_reliability_min = float(cycle_reliability_min)
         self.cycle_reliability_normalize = bool(cycle_reliability_normalize)
         self.cycle_reliability_apply_to_branches = bool(cycle_reliability_apply_to_branches)
+        self.cycle_reliability_learnable_mix = bool(cycle_reliability_learnable_mix)
         self.reliability_mix_min = 0.25
         self.reliability_mix_max = 0.75
         self.raw_reliability_pixel_lr_weight = nn.Parameter(torch.zeros(()))
         self.raw_reliability_structure_lr_weight = nn.Parameter(torch.zeros(()))
         self.raw_reliability_pixel_structure_weight = nn.Parameter(torch.zeros(()))
+        if not self.cycle_reliability_learnable_mix:
+            self.raw_reliability_pixel_lr_weight.requires_grad_(False)
+            self.raw_reliability_structure_lr_weight.requires_grad_(False)
+            self.raw_reliability_pixel_structure_weight.requires_grad_(False)
         self.observation_target_correction_enable = bool(observation_target_correction_enable)
         self.observation_target_correction_eta = float(observation_target_correction_eta)
         self.observation_target_correction_clamp = bool(observation_target_correction_clamp)
@@ -1603,6 +1686,9 @@ class DualLearningLoss(nn.Module):
         ) * torch.sigmoid(raw_weight)
 
     def get_reliability_mix_weights(self):
+        if not self.cycle_reliability_learnable_mix:
+            fixed_weight = self.raw_reliability_pixel_lr_weight.new_tensor(0.5)
+            return fixed_weight, fixed_weight, fixed_weight
         return (
             self._bounded_reliability_mix(self.raw_reliability_pixel_lr_weight),
             self._bounded_reliability_mix(self.raw_reliability_structure_lr_weight),
@@ -1989,9 +2075,21 @@ class DualLearningLoss(nn.Module):
             "bp_spatial_delta_mean": zero,
             "bp_spectral_delta_mean": zero,
         }
+        pullback_scale_items = {
+            "pullback_scale_3x3_mean": zero,
+            "pullback_scale_5x5_mean": zero,
+            "pullback_scale_7x7_mean": zero,
+        }
 
         if self.use_dual_pullback_fusion:
             reconstructed_hr_spatial = self.upsample_blur(output_lrhsi)
+            if isinstance(self.upsample_blur, MultiScaleSelectiveSpatialRefinement):
+                scale_weights = self.upsample_blur.last_scale_weights
+                pullback_scale_items = {
+                    "pullback_scale_3x3_mean": scale_weights[:, 0:1].mean(),
+                    "pullback_scale_5x5_mean": scale_weights[:, 1:2].mean(),
+                    "pullback_scale_7x7_mean": scale_weights[:, 2:3].mean(),
+                }
             if self.spectral_pullback is None:
                 reconstructed_hr_spectral = spectral_transform(output_hrmsi, self.R, inverse=True)
             else:
@@ -2157,6 +2255,9 @@ class DualLearningLoss(nn.Module):
             "ob_rely_pixel_lr_weight": reliability_items["ob_rely_pixel_lr_weight"],
             "ob_rely_structure_lr_weight": reliability_items["ob_rely_structure_lr_weight"],
             "ob_rely_pixel_structure_weight": reliability_items["ob_rely_pixel_structure_weight"],
+            "pullback_scale_3x3_mean": pullback_scale_items["pullback_scale_3x3_mean"].detach(),
+            "pullback_scale_5x5_mean": pullback_scale_items["pullback_scale_5x5_mean"].detach(),
+            "pullback_scale_7x7_mean": pullback_scale_items["pullback_scale_7x7_mean"].detach(),
             "target_corr_delta_spatial_mean": target_corr_items["target_corr_delta_spatial_mean"],
             "target_corr_delta_spectral_mean": target_corr_items["target_corr_delta_spectral_mean"],
             "target_corr_shift_mean": target_corr_items["target_corr_shift_mean"],
