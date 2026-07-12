@@ -61,7 +61,7 @@ CAVE:
     # experiment_name: 039_seed42_observation_backprojection_pullback
     # experiment_name: 040_seed42_detached_observation_backprojection
     # experiment_name: 041_seed42_spectral_only_observation_backprojection
-    experiment_name: 044_seed42_multiscale_ob_rely_refinement
+    experiment_name: 045_seed42_equal_scale_ob_rely_refinement
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -90,7 +90,7 @@ CAVE:
     cycle_schedule_final_scale: 0.3
     # 038：空间 branch 使用像素+Sobel结构可靠性，光谱 branch 仅使用像素观测可靠性。
     cycle_reliability_enable: true
-    cycle_reliability_mode: structure_multiscale_observation
+    cycle_reliability_mode: structure_multiscale_equal_observation
     cycle_reliability_tau: 2.0
     cycle_reliability_min: 0.2
     cycle_reliability_normalize: true

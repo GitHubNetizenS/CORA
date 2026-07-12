@@ -1449,9 +1449,10 @@ class MultiScaleOutputRefinement(nn.Module):
 
 class MultiScaleObservationReliabilityRefinement(nn.Module):
     """Bounded multi-scale refinement of an observation-derived reliability map."""
-    def __init__(self, modulation_limit=0.1):
+    def __init__(self, modulation_limit=0.1, use_scale_attention=True):
         super().__init__()
         self.modulation_limit = float(modulation_limit)
+        self.use_scale_attention = bool(use_scale_attention)
         self.error_embed = nn.Sequential(
             nn.Conv2d(2, 8, kernel_size=1),
             nn.GELU(),
@@ -1459,7 +1460,7 @@ class MultiScaleObservationReliabilityRefinement(nn.Module):
         self.branch_3x3 = nn.Conv2d(8, 8, kernel_size=3, padding=1, groups=8)
         self.branch_5x5 = nn.Conv2d(8, 8, kernel_size=5, padding=2, groups=8)
         self.branch_7x7 = nn.Conv2d(8, 8, kernel_size=7, padding=3, groups=8)
-        self.scale_attention = nn.Conv2d(8, 3, kernel_size=1)
+        self.scale_attention = nn.Conv2d(8, 3, kernel_size=1) if self.use_scale_attention else None
         self.delta_projection = nn.Conv2d(8, 1, kernel_size=1)
         nn.init.zeros_(self.delta_projection.weight)
         nn.init.zeros_(self.delta_projection.bias)
@@ -1476,7 +1477,12 @@ class MultiScaleObservationReliabilityRefinement(nn.Module):
         global_feat = F.gelu(self.branch_7x7(global_feat))
         global_feat = F.interpolate(global_feat, size=features.shape[-2:], mode="bilinear", align_corners=False)
 
-        scale_weights = torch.softmax(self.scale_attention(features), dim=1)
+        if self.scale_attention is None:
+            scale_weights = features.new_full(
+                (features.size(0), 3, features.size(2), features.size(3)), 1.0 / 3.0
+            )
+        else:
+            scale_weights = torch.softmax(self.scale_attention(features), dim=1)
         multi_scale_feature = (
             scale_weights[:, 0:1] * local
             + scale_weights[:, 1:2] * medium
@@ -1637,7 +1643,13 @@ class DualLearningLoss(nn.Module):
         self.cycle_reliability_learnable_mix = bool(cycle_reliability_learnable_mix)
         self.reliability_refiner = None
         if self.cycle_reliability_mode == "structure_multiscale_observation":
-            self.reliability_refiner = MultiScaleObservationReliabilityRefinement()
+            self.reliability_refiner = MultiScaleObservationReliabilityRefinement(
+                use_scale_attention=True
+            )
+        elif self.cycle_reliability_mode == "structure_multiscale_equal_observation":
+            self.reliability_refiner = MultiScaleObservationReliabilityRefinement(
+                use_scale_attention=False
+            )
         self.reliability_mix_min = 0.25
         self.reliability_mix_max = 0.75
         self.raw_reliability_pixel_lr_weight = nn.Parameter(torch.zeros(()))
@@ -1862,7 +1874,8 @@ class DualLearningLoss(nn.Module):
         if self.cycle_reliability_mode == "robust_observation":
             observation_error = self._robust_normalize_observation_error(observation_error)
         elif self.cycle_reliability_mode in (
-                "structure_observation", "structure_multiscale_observation"):
+                "structure_observation", "structure_multiscale_observation",
+                "structure_multiscale_equal_observation"):
             lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
             lr_structure_hr = F.interpolate(
                 lr_structure,
