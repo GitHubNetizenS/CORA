@@ -1499,6 +1499,43 @@ class MultiScaleObservationReliabilityRefinement(nn.Module):
         return refined_weight
 
 
+class GlobalObservationReliabilityRefinement(nn.Module):
+    """Bounded coarse-scale refinement for an observation-derived reliability map."""
+    def __init__(self, modulation_limit=0.1):
+        super().__init__()
+        self.modulation_limit = float(modulation_limit)
+        self.error_embed = nn.Sequential(
+            nn.Conv2d(2, 8, kernel_size=1),
+            nn.GELU(),
+        )
+        self.global_branch = nn.Conv2d(8, 8, kernel_size=7, padding=3, groups=8)
+        self.delta_projection = nn.Conv2d(8, 1, kernel_size=1)
+        nn.init.zeros_(self.delta_projection.weight)
+        nn.init.zeros_(self.delta_projection.bias)
+        self.last_scale_weights = None
+        self.last_delta_abs_mean = None
+
+    def forward(self, pixel_error, structure_error, base_weight):
+        features = self.error_embed(torch.cat([pixel_error, structure_error], dim=1))
+        global_feat = F.avg_pool2d(features, kernel_size=4, stride=4)
+        global_feat = F.gelu(self.global_branch(global_feat))
+        global_feat = F.interpolate(
+            global_feat, size=features.shape[-2:], mode="bilinear", align_corners=False
+        )
+        delta = self.delta_projection(global_feat)
+        modulation = 1.0 + self.modulation_limit * torch.tanh(delta)
+        refined_weight = base_weight * modulation
+        refined_weight = refined_weight / (
+            refined_weight.detach().mean(dim=(2, 3), keepdim=True) + 1e-6
+        )
+        self.last_scale_weights = features.new_zeros(
+            (features.size(0), 3, features.size(2), features.size(3))
+        )
+        self.last_scale_weights[:, 2:3] = 1.0
+        self.last_delta_abs_mean = delta.detach().abs().mean()
+        return refined_weight
+
+
 class DualLearningLoss(nn.Module):
     """Dual learning loss with legacy modes and final dual-pullback AGF mode."""
     def __init__(self, R, downsample_factor=8,
@@ -1650,6 +1687,8 @@ class DualLearningLoss(nn.Module):
             self.reliability_refiner = MultiScaleObservationReliabilityRefinement(
                 use_scale_attention=False
             )
+        elif self.cycle_reliability_mode == "structure_global_observation":
+            self.reliability_refiner = GlobalObservationReliabilityRefinement()
         self.reliability_mix_min = 0.25
         self.reliability_mix_max = 0.75
         self.raw_reliability_pixel_lr_weight = nn.Parameter(torch.zeros(()))
@@ -1875,7 +1914,7 @@ class DualLearningLoss(nn.Module):
             observation_error = self._robust_normalize_observation_error(observation_error)
         elif self.cycle_reliability_mode in (
                 "structure_observation", "structure_multiscale_observation",
-                "structure_multiscale_equal_observation"):
+                "structure_multiscale_equal_observation", "structure_global_observation"):
             lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
             lr_structure_hr = F.interpolate(
                 lr_structure,
