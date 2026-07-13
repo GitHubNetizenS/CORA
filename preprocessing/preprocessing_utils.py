@@ -1449,10 +1449,12 @@ class MultiScaleOutputRefinement(nn.Module):
 
 class MultiScaleObservationReliabilityRefinement(nn.Module):
     """Bounded multi-scale refinement of an observation-derived reliability map."""
-    def __init__(self, modulation_limit=0.1, use_scale_attention=True):
+    def __init__(self, modulation_limit=0.1, use_scale_attention=True,
+                 calibrate_delta=False):
         super().__init__()
         self.modulation_limit = float(modulation_limit)
         self.use_scale_attention = bool(use_scale_attention)
+        self.calibrate_delta = bool(calibrate_delta)
         self.error_embed = nn.Sequential(
             nn.Conv2d(2, 8, kernel_size=1),
             nn.GELU(),
@@ -1466,6 +1468,7 @@ class MultiScaleObservationReliabilityRefinement(nn.Module):
         nn.init.zeros_(self.delta_projection.bias)
         self.last_scale_weights = None
         self.last_delta_abs_mean = None
+        self.last_delta_calibrated_abs_mean = None
 
     def forward(self, pixel_error, structure_error, base_weight):
         features = self.error_embed(torch.cat([pixel_error, structure_error], dim=1))
@@ -1489,13 +1492,21 @@ class MultiScaleObservationReliabilityRefinement(nn.Module):
             + scale_weights[:, 2:3] * global_feat
         )
         delta = self.delta_projection(multi_scale_feature)
-        modulation = 1.0 + self.modulation_limit * torch.tanh(delta)
+        if self.calibrate_delta:
+            delta_rms = torch.sqrt(
+                torch.mean(delta.detach().pow(2), dim=(2, 3), keepdim=True) + 1e-12
+            ).clamp_min(1.0)
+            delta_for_modulation = delta / delta_rms
+        else:
+            delta_for_modulation = delta
+        modulation = 1.0 + self.modulation_limit * torch.tanh(delta_for_modulation)
         refined_weight = base_weight * modulation
         refined_weight = refined_weight / (
             refined_weight.detach().mean(dim=(2, 3), keepdim=True) + 1e-6
         )
         self.last_scale_weights = scale_weights.detach()
         self.last_delta_abs_mean = delta.detach().abs().mean()
+        self.last_delta_calibrated_abs_mean = delta_for_modulation.detach().abs().mean()
         return refined_weight
 
 
@@ -1514,6 +1525,7 @@ class GlobalObservationReliabilityRefinement(nn.Module):
         nn.init.zeros_(self.delta_projection.bias)
         self.last_scale_weights = None
         self.last_delta_abs_mean = None
+        self.last_delta_calibrated_abs_mean = None
 
     def forward(self, pixel_error, structure_error, base_weight):
         features = self.error_embed(torch.cat([pixel_error, structure_error], dim=1))
@@ -1533,6 +1545,7 @@ class GlobalObservationReliabilityRefinement(nn.Module):
         )
         self.last_scale_weights[:, 2:3] = 1.0
         self.last_delta_abs_mean = delta.detach().abs().mean()
+        self.last_delta_calibrated_abs_mean = delta.detach().abs().mean()
         return refined_weight
 
 
@@ -1687,6 +1700,11 @@ class DualLearningLoss(nn.Module):
             self.reliability_refiner = MultiScaleObservationReliabilityRefinement(
                 use_scale_attention=False
             )
+        elif self.cycle_reliability_mode == "structure_multiscale_calibrated_observation":
+            self.reliability_refiner = MultiScaleObservationReliabilityRefinement(
+                use_scale_attention=True,
+                calibrate_delta=True,
+            )
         elif self.cycle_reliability_mode == "structure_global_observation":
             self.reliability_refiner = GlobalObservationReliabilityRefinement()
         self.reliability_mix_min = 0.25
@@ -1751,6 +1769,7 @@ class DualLearningLoss(nn.Module):
                 "ob_rely_scale_5x5_mean": zero,
                 "ob_rely_scale_7x7_mean": zero,
                 "ob_rely_refine_delta_abs_mean": zero,
+                "ob_rely_refine_delta_cal_abs_mean": zero,
             }
         weights = self.reliability_refiner.last_scale_weights
         return {
@@ -1758,6 +1777,7 @@ class DualLearningLoss(nn.Module):
             "ob_rely_scale_5x5_mean": weights[:, 1:2].mean(),
             "ob_rely_scale_7x7_mean": weights[:, 2:3].mean(),
             "ob_rely_refine_delta_abs_mean": self.reliability_refiner.last_delta_abs_mean,
+            "ob_rely_refine_delta_cal_abs_mean": self.reliability_refiner.last_delta_calibrated_abs_mean,
         }
 
     @staticmethod
@@ -1799,6 +1819,7 @@ class DualLearningLoss(nn.Module):
             "ob_rely_scale_5x5_mean": reference.new_tensor(0.0),
             "ob_rely_scale_7x7_mean": reference.new_tensor(0.0),
             "ob_rely_refine_delta_abs_mean": reference.new_tensor(0.0),
+            "ob_rely_refine_delta_cal_abs_mean": reference.new_tensor(0.0),
         }
 
     def _bounded_reliability_mix(self, raw_weight):
@@ -1914,7 +1935,9 @@ class DualLearningLoss(nn.Module):
             observation_error = self._robust_normalize_observation_error(observation_error)
         elif self.cycle_reliability_mode in (
                 "structure_observation", "structure_multiscale_observation",
-                "structure_multiscale_equal_observation", "structure_global_observation"):
+                "structure_multiscale_equal_observation",
+                "structure_multiscale_calibrated_observation",
+                "structure_global_observation"):
             lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
             lr_structure_hr = F.interpolate(
                 lr_structure,
@@ -2378,6 +2401,7 @@ class DualLearningLoss(nn.Module):
             "ob_rely_scale_5x5_mean": reliability_refinement_items["ob_rely_scale_5x5_mean"].detach(),
             "ob_rely_scale_7x7_mean": reliability_refinement_items["ob_rely_scale_7x7_mean"].detach(),
             "ob_rely_refine_delta_abs_mean": reliability_refinement_items["ob_rely_refine_delta_abs_mean"].detach(),
+            "ob_rely_refine_delta_cal_abs_mean": reliability_refinement_items["ob_rely_refine_delta_cal_abs_mean"].detach(),
             "target_corr_delta_spatial_mean": target_corr_items["target_corr_delta_spatial_mean"],
             "target_corr_delta_spectral_mean": target_corr_items["target_corr_delta_spectral_mean"],
             "target_corr_shift_mean": target_corr_items["target_corr_shift_mean"],

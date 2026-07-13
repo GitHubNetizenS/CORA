@@ -148,6 +148,7 @@ def make_zero_ddl_items(reference):
         "ob_rely_scale_5x5_mean": zero,
         "ob_rely_scale_7x7_mean": zero,
         "ob_rely_refine_delta_abs_mean": zero,
+        "ob_rely_refine_delta_cal_abs_mean": zero,
         "target_corr_delta_spatial_mean": zero,
         "target_corr_delta_spectral_mean": zero,
         "target_corr_shift_mean": zero,
@@ -357,6 +358,7 @@ if "__main__"==__name__:
                                        "output_refine_scale_7x7_mean", "output_refine_residual_abs_mean",
                                        "ob_rely_scale_3x3_mean", "ob_rely_scale_5x5_mean",
                                        "ob_rely_scale_7x7_mean", "ob_rely_refine_delta_abs_mean",
+                                       "ob_rely_refine_delta_cal_abs_mean",
                                        "target_corr_delta_spatial_mean", "target_corr_delta_spectral_mean",
                                        "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta",
                                        "bp_spatial_delta_mean", "bp_spectral_delta_mean"])
@@ -734,6 +736,7 @@ if "__main__"==__name__:
                             loss_ddl_items["ob_rely_scale_5x5_mean"].item(),
                             loss_ddl_items["ob_rely_scale_7x7_mean"].item(),
                             loss_ddl_items["ob_rely_refine_delta_abs_mean"].item(),
+                            loss_ddl_items["ob_rely_refine_delta_cal_abs_mean"].item(),
                             loss_ddl_items["target_corr_delta_spatial_mean"].item(),
                             loss_ddl_items["target_corr_delta_spectral_mean"].item(),
                             loss_ddl_items["target_corr_shift_mean"].item(),
