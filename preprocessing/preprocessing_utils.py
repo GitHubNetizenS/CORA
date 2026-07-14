@@ -1510,6 +1510,69 @@ class MultiScaleObservationReliabilityRefinement(nn.Module):
         return refined_weight
 
 
+class NonCompetitiveMultiScaleObservationReliabilityRefinement(nn.Module):
+    """Residual multi-scale OB-Rely refinement without zero-sum scale competition."""
+    def __init__(self, modulation_limit=0.1):
+        super().__init__()
+        self.modulation_limit = float(modulation_limit)
+        self.error_embed = nn.Sequential(
+            nn.Conv2d(2, 8, kernel_size=1),
+            nn.GELU(),
+        )
+        self.scale_branches = nn.ModuleList([
+            nn.Conv2d(8, 8, kernel_size=3, padding=1, groups=8),
+            nn.Conv2d(8, 8, kernel_size=5, padding=2, groups=8),
+            nn.Conv2d(8, 8, kernel_size=7, padding=3, groups=8),
+        ])
+        self.scale_gates = nn.ModuleList([
+            nn.Conv2d(8, 1, kernel_size=1),
+            nn.Conv2d(8, 1, kernel_size=1),
+            nn.Conv2d(8, 1, kernel_size=1),
+        ])
+        self.scale_fusion = nn.Sequential(
+            nn.Conv2d(24, 8, kernel_size=1),
+            nn.GELU(),
+        )
+        self.delta_projection = nn.Conv2d(8, 1, kernel_size=1)
+
+        # Independent gates start equally active, while the zero-initialized
+        # projection keeps the initial output identical to the base OB-Rely map.
+        for gate in self.scale_gates:
+            nn.init.zeros_(gate.weight)
+            nn.init.zeros_(gate.bias)
+        nn.init.zeros_(self.delta_projection.weight)
+        nn.init.zeros_(self.delta_projection.bias)
+
+        self.last_scale_weights = None
+        self.last_delta_abs_mean = None
+        self.last_delta_calibrated_abs_mean = None
+
+    def forward(self, pixel_error, structure_error, base_weight):
+        features = self.error_embed(torch.cat([pixel_error, structure_error], dim=1))
+        branch_features = []
+        scale_gates = []
+        for branch, gate_layer in zip(self.scale_branches, self.scale_gates):
+            branch_feature = F.gelu(branch(features))
+            gate = torch.sigmoid(gate_layer(branch_feature))
+            branch_features.append(gate * branch_feature)
+            scale_gates.append(gate)
+
+        multi_scale_feature = self.scale_fusion(torch.cat(branch_features, dim=1))
+        refined_feature = features + multi_scale_feature
+        delta = self.delta_projection(refined_feature)
+        modulation = 1.0 + self.modulation_limit * torch.tanh(delta)
+        refined_weight = base_weight * modulation
+        refined_weight = refined_weight / (
+            refined_weight.detach().mean(dim=(2, 3), keepdim=True) + 1e-6
+        )
+
+        # These are independent gate activations, not softmax proportions.
+        self.last_scale_weights = torch.cat(scale_gates, dim=1).detach()
+        self.last_delta_abs_mean = delta.detach().abs().mean()
+        self.last_delta_calibrated_abs_mean = delta.detach().abs().mean()
+        return refined_weight
+
+
 class GlobalObservationReliabilityRefinement(nn.Module):
     """Bounded coarse-scale refinement for an observation-derived reliability map."""
     def __init__(self, modulation_limit=0.1):
@@ -1705,6 +1768,8 @@ class DualLearningLoss(nn.Module):
                 use_scale_attention=True,
                 calibrate_delta=True,
             )
+        elif self.cycle_reliability_mode == "structure_noncompetitive_multiscale_observation":
+            self.reliability_refiner = NonCompetitiveMultiScaleObservationReliabilityRefinement()
         elif self.cycle_reliability_mode == "structure_global_observation":
             self.reliability_refiner = GlobalObservationReliabilityRefinement()
         self.reliability_mix_min = 0.25
@@ -1937,6 +2002,7 @@ class DualLearningLoss(nn.Module):
                 "structure_observation", "structure_multiscale_observation",
                 "structure_multiscale_equal_observation",
                 "structure_multiscale_calibrated_observation",
+                "structure_noncompetitive_multiscale_observation",
                 "structure_global_observation"):
             lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
             lr_structure_hr = F.interpolate(
