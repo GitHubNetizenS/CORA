@@ -1573,6 +1573,96 @@ class NonCompetitiveMultiScaleObservationReliabilityRefinement(nn.Module):
         return refined_weight
 
 
+class FrequencyDecoupledObservationReliabilityRefinement(nn.Module):
+    """Refine OB-Rely through complementary spatial-frequency bands."""
+    def __init__(self, modulation_limit=0.1):
+        super().__init__()
+        self.modulation_limit = float(modulation_limit)
+        self.error_embed = nn.Sequential(
+            nn.Conv2d(2, 8, kernel_size=1),
+            nn.GELU(),
+        )
+        self.band_refiners = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(8, 8, kernel_size=3, padding=1, groups=8),
+                nn.GELU(),
+            )
+            for _ in range(3)
+        ])
+        self.delta_projection = nn.Conv2d(8, 1, kernel_size=1)
+        nn.init.zeros_(self.delta_projection.weight)
+        nn.init.zeros_(self.delta_projection.bias)
+
+        self.register_buffer("gaussian_small", self._gaussian_kernel(5, 1.0))
+        self.register_buffer("gaussian_large", self._gaussian_kernel(9, 2.0))
+        self.last_scale_weights = None
+        self.last_band_energies = None
+        self.last_delta_abs_mean = None
+        self.last_delta_calibrated_abs_mean = None
+
+    @staticmethod
+    def _gaussian_kernel(kernel_size, sigma):
+        coords = torch.arange(kernel_size, dtype=torch.float32)
+        coords = coords - (kernel_size - 1) / 2.0
+        kernel_1d = torch.exp(-(coords ** 2) / (2.0 * sigma ** 2))
+        kernel_1d = kernel_1d / kernel_1d.sum()
+        kernel_2d = torch.outer(kernel_1d, kernel_1d)
+        return kernel_2d.view(1, 1, kernel_size, kernel_size)
+
+    @staticmethod
+    def _gaussian_filter(x, kernel):
+        padding = kernel.shape[-1] // 2
+        padded = F.pad(x, (padding, padding, padding, padding), mode="reflect")
+        depthwise_kernel = kernel.expand(x.size(1), 1, -1, -1)
+        return F.conv2d(padded, depthwise_kernel, groups=x.size(1))
+
+    def forward(self, pixel_error, structure_error, base_weight):
+        features = self.error_embed(torch.cat([pixel_error, structure_error], dim=1))
+        smooth_small = self._gaussian_filter(features, self.gaussian_small)
+        smooth_large = self._gaussian_filter(features, self.gaussian_large)
+
+        # Difference-of-Gaussians style bands are complementary:
+        # high + mid + low reconstructs the embedded observation error.
+        high_band = features - smooth_small
+        mid_band = smooth_small - smooth_large
+        low_band = smooth_large
+        bands = (high_band, mid_band, low_band)
+
+        refined_bands = [
+            refiner(band) for refiner, band in zip(self.band_refiners, bands)
+        ]
+        refined_feature = (
+            features + refined_bands[0] + refined_bands[1] + refined_bands[2]
+        )
+        delta = self.delta_projection(refined_feature)
+
+        # Normalize the learned correction before bounded multiplicative
+        # modulation so one frequency band cannot dominate by scale alone.
+        delta_mean = delta.mean(dim=(2, 3), keepdim=True)
+        delta_var = (delta - delta_mean).pow(2).mean(dim=(2, 3), keepdim=True)
+        delta_normalized = (delta - delta_mean) / torch.sqrt(delta_var + 1e-6)
+        modulation = torch.exp(
+            self.modulation_limit * torch.tanh(delta_normalized)
+        )
+        refined_weight = base_weight * modulation
+        refined_weight = refined_weight / (
+            refined_weight.detach().mean(dim=(2, 3), keepdim=True) + 1e-6
+        )
+
+        band_energy = [band.abs().mean(dim=1, keepdim=True) for band in bands]
+        total_energy = band_energy[0] + band_energy[1] + band_energy[2] + 1e-6
+        self.last_band_energies = torch.cat(
+            [energy / total_energy for energy in band_energy], dim=1
+        ).detach()
+        # Retain the legacy scale fields as zeros; 049 logs band energies instead.
+        self.last_scale_weights = features.new_zeros(
+            (features.size(0), 3, features.size(2), features.size(3))
+        )
+        self.last_delta_abs_mean = delta.detach().abs().mean()
+        self.last_delta_calibrated_abs_mean = delta_normalized.detach().abs().mean()
+        return refined_weight
+
+
 class GlobalObservationReliabilityRefinement(nn.Module):
     """Bounded coarse-scale refinement for an observation-derived reliability map."""
     def __init__(self, modulation_limit=0.1):
@@ -1770,6 +1860,8 @@ class DualLearningLoss(nn.Module):
             )
         elif self.cycle_reliability_mode == "structure_noncompetitive_multiscale_observation":
             self.reliability_refiner = NonCompetitiveMultiScaleObservationReliabilityRefinement()
+        elif self.cycle_reliability_mode == "structure_frequency_decoupled_observation":
+            self.reliability_refiner = FrequencyDecoupledObservationReliabilityRefinement()
         elif self.cycle_reliability_mode == "structure_global_observation":
             self.reliability_refiner = GlobalObservationReliabilityRefinement()
         self.reliability_mix_min = 0.25
@@ -1833,14 +1925,29 @@ class DualLearningLoss(nn.Module):
                 "ob_rely_scale_3x3_mean": zero,
                 "ob_rely_scale_5x5_mean": zero,
                 "ob_rely_scale_7x7_mean": zero,
+                "ob_rely_band_high_mean": zero,
+                "ob_rely_band_mid_mean": zero,
+                "ob_rely_band_low_mean": zero,
                 "ob_rely_refine_delta_abs_mean": zero,
                 "ob_rely_refine_delta_cal_abs_mean": zero,
             }
         weights = self.reliability_refiner.last_scale_weights
+        band_energies = getattr(self.reliability_refiner, "last_band_energies", None)
+        if band_energies is None:
+            high_energy = zero
+            mid_energy = zero
+            low_energy = zero
+        else:
+            high_energy = band_energies[:, 0:1].mean()
+            mid_energy = band_energies[:, 1:2].mean()
+            low_energy = band_energies[:, 2:3].mean()
         return {
             "ob_rely_scale_3x3_mean": weights[:, 0:1].mean(),
             "ob_rely_scale_5x5_mean": weights[:, 1:2].mean(),
             "ob_rely_scale_7x7_mean": weights[:, 2:3].mean(),
+            "ob_rely_band_high_mean": high_energy,
+            "ob_rely_band_mid_mean": mid_energy,
+            "ob_rely_band_low_mean": low_energy,
             "ob_rely_refine_delta_abs_mean": self.reliability_refiner.last_delta_abs_mean,
             "ob_rely_refine_delta_cal_abs_mean": self.reliability_refiner.last_delta_calibrated_abs_mean,
         }
@@ -1883,6 +1990,9 @@ class DualLearningLoss(nn.Module):
             "ob_rely_scale_3x3_mean": reference.new_tensor(0.0),
             "ob_rely_scale_5x5_mean": reference.new_tensor(0.0),
             "ob_rely_scale_7x7_mean": reference.new_tensor(0.0),
+            "ob_rely_band_high_mean": reference.new_tensor(0.0),
+            "ob_rely_band_mid_mean": reference.new_tensor(0.0),
+            "ob_rely_band_low_mean": reference.new_tensor(0.0),
             "ob_rely_refine_delta_abs_mean": reference.new_tensor(0.0),
             "ob_rely_refine_delta_cal_abs_mean": reference.new_tensor(0.0),
         }
@@ -2003,6 +2113,7 @@ class DualLearningLoss(nn.Module):
                 "structure_multiscale_equal_observation",
                 "structure_multiscale_calibrated_observation",
                 "structure_noncompetitive_multiscale_observation",
+                "structure_frequency_decoupled_observation",
                 "structure_global_observation"):
             lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
             lr_structure_hr = F.interpolate(
@@ -2466,6 +2577,9 @@ class DualLearningLoss(nn.Module):
             "ob_rely_scale_3x3_mean": reliability_refinement_items["ob_rely_scale_3x3_mean"].detach(),
             "ob_rely_scale_5x5_mean": reliability_refinement_items["ob_rely_scale_5x5_mean"].detach(),
             "ob_rely_scale_7x7_mean": reliability_refinement_items["ob_rely_scale_7x7_mean"].detach(),
+            "ob_rely_band_high_mean": reliability_refinement_items["ob_rely_band_high_mean"].detach(),
+            "ob_rely_band_mid_mean": reliability_refinement_items["ob_rely_band_mid_mean"].detach(),
+            "ob_rely_band_low_mean": reliability_refinement_items["ob_rely_band_low_mean"].detach(),
             "ob_rely_refine_delta_abs_mean": reliability_refinement_items["ob_rely_refine_delta_abs_mean"].detach(),
             "ob_rely_refine_delta_cal_abs_mean": reliability_refinement_items["ob_rely_refine_delta_cal_abs_mean"].detach(),
             "target_corr_delta_spatial_mean": target_corr_items["target_corr_delta_spatial_mean"],
