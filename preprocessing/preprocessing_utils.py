@@ -1314,6 +1314,59 @@ class LearnableSpectralPullback(nn.Module):
         return pinv_base + residual
 
 
+class ObservationGuidedSharedPullbackRefinement(nn.Module):
+    """Shared lightweight residual refinement after the two physical pullbacks."""
+    def __init__(self, channels, correction_limit=0.1):
+        super().__init__()
+        self.correction_limit = float(correction_limit)
+        self.refine = nn.Sequential(
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1,
+                groups=channels,
+            ),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=1),
+        )
+        nn.init.zeros_(self.refine[-1].weight)
+        nn.init.zeros_(self.refine[-1].bias)
+        self.last_spatial_correction_abs_mean = None
+        self.last_spectral_correction_abs_mean = None
+
+    def _refine_one(self, x, reliability):
+        residual = self.refine(x)
+        correction = (
+            self.correction_limit
+            * reliability.detach()
+            * torch.tanh(residual)
+        )
+        return x + correction, correction
+
+    def forward(
+            self,
+            reconstructed_hr_spatial,
+            reconstructed_hr_spectral,
+            spatial_reliability,
+            spectral_reliability):
+        refined_spatial, spatial_correction = self._refine_one(
+            reconstructed_hr_spatial,
+            spatial_reliability,
+        )
+        refined_spectral, spectral_correction = self._refine_one(
+            reconstructed_hr_spectral,
+            spectral_reliability,
+        )
+        self.last_spatial_correction_abs_mean = (
+            spatial_correction.detach().abs().mean()
+        )
+        self.last_spectral_correction_abs_mean = (
+            spectral_correction.detach().abs().mean()
+        )
+        return refined_spatial, refined_spectral
+
+
 class RemoteSensingDualPullbackFusion(nn.Module):
     """
     Remote-sensing adapted single AGF for fusing two pullback HR-HSI estimates.
@@ -1744,10 +1797,12 @@ class DualLearningLoss(nn.Module):
             "dual_pullback_constrained_kernel_v1",
             "dual_pullback_psf_matched_v1",
             "dual_pullback_observation_bp_v1",
+            "dual_pullback_shared_refine_v1",
         )
         self.spectral_pullback_learnable = bool(spectral_pullback_learnable)
         self.spectral_pullback = None
         self.pullback_fusion = None
+        self.pullback_refiner = None
         self.output_refinement_enable = bool(output_refinement_enable)
         self.output_refiner = None
         if self.output_refinement_enable:
@@ -1818,6 +1873,20 @@ class DualLearningLoss(nn.Module):
             self.upsample_blur.blur_kernel.requires_grad_(False)
             if self.spectral_pullback_learnable:
                 self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
+        elif pullback_mode == "dual_pullback_shared_refine_v1":
+            # Keep both physical pullbacks unchanged. The shared module only
+            # refines their reconstructed HR-HSI outputs before branch cycles.
+            self.upsample_blur = UpsampleBlur(
+                scale_factor=downsample_factor,
+                channels=response.shape[1],
+            )
+            self.upsample_blur.blur_kernel.requires_grad_(False)
+            if self.spectral_pullback_learnable:
+                self.spectral_pullback = LearnableSpectralPullback(response)
+            self.pullback_refiner = ObservationGuidedSharedPullbackRefinement(
+                response.shape[1]
+            )
             self.pullback_fusion = RemoteSensingDualPullbackFusion(response.shape[1])
         else:
             raise ValueError(f"Unsupported pullback_mode: {pullback_mode}")
@@ -2401,6 +2470,10 @@ class DualLearningLoss(nn.Module):
             "bp_spatial_delta_mean": zero,
             "bp_spectral_delta_mean": zero,
         }
+        pullback_refinement_items = {
+            "pullback_refine_spatial_abs_mean": zero,
+            "pullback_refine_spectral_abs_mean": zero,
+        }
 
         if self.use_dual_pullback_fusion:
             reconstructed_hr_spatial = self.upsample_blur(output_lrhsi)
@@ -2452,6 +2525,23 @@ class DualLearningLoss(nn.Module):
                 )
                 spatial_reliability_weight = reliability_weight
                 spectral_reliability_weight = reliability_weight
+            if self.pullback_refiner is not None:
+                reconstructed_hr_spatial, reconstructed_hr_spectral = (
+                    self.pullback_refiner(
+                        reconstructed_hr_spatial,
+                        reconstructed_hr_spectral,
+                        spatial_reliability_weight,
+                        spectral_reliability_weight,
+                    )
+                )
+                pullback_refinement_items = {
+                    "pullback_refine_spatial_abs_mean": (
+                        self.pullback_refiner.last_spatial_correction_abs_mean
+                    ),
+                    "pullback_refine_spectral_abs_mean": (
+                        self.pullback_refiner.last_spectral_correction_abs_mean
+                    ),
+                }
             spatial_cycle_abs = torch.abs(reconstructed_hr_spatial - target_hrhsi)
             spectral_cycle_abs = torch.abs(reconstructed_hr_spectral - target_hrhsi)
             spatial_cycle_abs_for_loss = torch.abs(reconstructed_hr_spatial - target_corr)
@@ -2582,6 +2672,8 @@ class DualLearningLoss(nn.Module):
             "ob_rely_band_low_mean": reliability_refinement_items["ob_rely_band_low_mean"].detach(),
             "ob_rely_refine_delta_abs_mean": reliability_refinement_items["ob_rely_refine_delta_abs_mean"].detach(),
             "ob_rely_refine_delta_cal_abs_mean": reliability_refinement_items["ob_rely_refine_delta_cal_abs_mean"].detach(),
+            "pullback_refine_spatial_abs_mean": pullback_refinement_items["pullback_refine_spatial_abs_mean"].detach(),
+            "pullback_refine_spectral_abs_mean": pullback_refinement_items["pullback_refine_spectral_abs_mean"].detach(),
             "target_corr_delta_spatial_mean": target_corr_items["target_corr_delta_spatial_mean"],
             "target_corr_delta_spectral_mean": target_corr_items["target_corr_delta_spectral_mean"],
             "target_corr_shift_mean": target_corr_items["target_corr_shift_mean"],
