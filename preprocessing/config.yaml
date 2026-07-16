@@ -61,9 +61,11 @@ CAVE:
     # experiment_name: 039_seed42_observation_backprojection_pullback
     # experiment_name: 040_seed42_detached_observation_backprojection
     # experiment_name: 041_seed42_spectral_only_observation_backprojection
-    experiment_name: 050_seed42_shared_small_pullback_refinement
+    # experiment_name: 050_seed42_shared_small_pullback_refinement
+    # 051：基于033，为空间/光谱cycle分别生成语义对应的可靠性图。
+    experiment_name: 051_seed42_semantic_branch_ob_rely
     legacy_cycle_only_log: false
-    pullback_mode: dual_pullback_shared_refine_v1
+    pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
     # 015：沿用 013 结构，将两个 branch cycle 权重从 0.001 提高到 0.002。
     # lambda_cycle_spatial: 0.002
@@ -90,8 +92,8 @@ CAVE:
     cycle_schedule_final_scale: 0.3
     # 038：空间 branch 使用像素+Sobel结构可靠性，光谱 branch 仅使用像素观测可靠性。
     cycle_reliability_enable: true
-    # 050：保持 033 的数学 OB-Rely，只在两个固定拉回结果之后共享一个小型残差精炼器。
-    cycle_reliability_mode: structure_observation
+    # 051：空间cycle由HRMSI像素/Sobel误差引导；光谱cycle由LRHSI像素/光谱差分误差引导。
+    cycle_reliability_mode: semantic_branch_observation
     cycle_reliability_tau: 2.0
     cycle_reliability_min: 0.2
     cycle_reliability_normalize: true

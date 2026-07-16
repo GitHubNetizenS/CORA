@@ -2105,6 +2105,15 @@ class DualLearningLoss(nn.Module):
         return (torch.abs(pred_x - target_x) + torch.abs(pred_y - target_y)).mean(dim=1, keepdim=True)
 
     @staticmethod
+    def _spectral_gradient_error(pred, target):
+        """Measure first-order spectral-curve disagreement at each pixel."""
+        pred = pred.detach()
+        target = target.detach()
+        pred_gradient = pred[:, 1:, :, :] - pred[:, :-1, :, :]
+        target_gradient = target[:, 1:, :, :] - target[:, :-1, :, :]
+        return torch.abs(pred_gradient - target_gradient).mean(dim=1, keepdim=True)
+
+    @staticmethod
     def _haar_high_frequency(x):
         h_even = x.size(2) - (x.size(2) % 2)
         w_even = x.size(3) - (x.size(3) % 2)
@@ -2241,6 +2250,86 @@ class DualLearningLoss(nn.Module):
             "ob_rely_pixel_lr_weight": pixel_lr_weight.detach(),
             "ob_rely_structure_lr_weight": structure_lr_weight.detach(),
             "ob_rely_pixel_structure_weight": pixel_structure_weight.detach(),
+        }
+
+    def semantic_branch_observation_reliability_weight(
+            self, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, reference):
+        """Use modality-specific evidence to weight the two pullback cycles."""
+        if not self.cycle_reliability_enable:
+            weight = reference.new_ones(
+                reference.size(0), 1, reference.size(2), reference.size(3)
+            )
+            return weight, weight, {
+                "reliability_weight_mean": weight.mean().detach(),
+                "reliability_weight_min": weight.amin().detach(),
+                "reliability_weight_max": weight.amax().detach(),
+                "spatial_reliability_weight_mean": weight.mean().detach(),
+                "spatial_reliability_weight_min": weight.amin().detach(),
+                "spatial_reliability_weight_max": weight.amax().detach(),
+                "spectral_reliability_weight_mean": weight.mean().detach(),
+                "spectral_reliability_weight_min": weight.amin().detach(),
+                "spectral_reliability_weight_max": weight.amax().detach(),
+                "obs_lr_error_mean": reference.new_tensor(0.0),
+                "obs_ms_error_mean": reference.new_tensor(0.0),
+                "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
+                "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+                "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
+            }
+
+        # HRMSI提供高空间分辨率证据，用于空间拉回cycle的可靠性估计。
+        ms_pixel_error = torch.mean(
+            torch.abs(output_hrmsi.detach() - hr_msi), dim=1, keepdim=True
+        )
+        ms_structure_error = self._sobel_error(output_hrmsi, hr_msi)
+        spatial_observation_error = (
+            self._normalize_observation_error(ms_pixel_error)
+            + self._normalize_observation_error(ms_structure_error)
+        )
+
+        # LRHSI包含完整波段，像素误差与相邻波段一阶差分共同描述光谱可靠性。
+        lr_pixel_error = torch.mean(
+            torch.abs(output_lrhsi.detach() - lr_hsi), dim=1, keepdim=True
+        )
+        lr_spectral_error = self._spectral_gradient_error(output_lrhsi, lr_hsi)
+        spectral_observation_error = (
+            self._normalize_observation_error(lr_pixel_error)
+            + self._normalize_observation_error(lr_spectral_error)
+        )
+        spectral_observation_error_hr = F.interpolate(
+            spectral_observation_error,
+            size=reference.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        spatial_weight = self._observation_error_to_reliability(
+            spatial_observation_error
+        )
+        spectral_weight = self._observation_error_to_reliability(
+            spectral_observation_error_hr
+        )
+        combined_weight = 0.5 * (spatial_weight + spectral_weight)
+
+        return spatial_weight, spectral_weight, {
+            "reliability_weight_mean": combined_weight.mean().detach(),
+            "reliability_weight_min": combined_weight.amin().detach(),
+            "reliability_weight_max": combined_weight.amax().detach(),
+            "spatial_reliability_weight_mean": spatial_weight.mean().detach(),
+            "spatial_reliability_weight_min": spatial_weight.amin().detach(),
+            "spatial_reliability_weight_max": spatial_weight.amax().detach(),
+            "spectral_reliability_weight_mean": spectral_weight.mean().detach(),
+            "spectral_reliability_weight_min": spectral_weight.amin().detach(),
+            "spectral_reliability_weight_max": spectral_weight.amax().detach(),
+            "obs_lr_error_mean": lr_pixel_error.mean().detach(),
+            "obs_ms_error_mean": ms_pixel_error.mean().detach(),
+            # 复用现有CSV诊断列，分别记录两个支路归一化后的观测误差。
+            "cross_spatial_ms_error_mean": spatial_observation_error.mean().detach(),
+            "cross_spectral_lr_error_mean": spectral_observation_error_hr.mean().detach(),
+            "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+            "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
         }
 
     def branch_specific_structure_reliability_weight(
@@ -2504,6 +2593,19 @@ class DualLearningLoss(nn.Module):
                     )
                 )
                 reliability_weight = 0.5 * (spatial_reliability_weight + spectral_reliability_weight)
+            elif self.cycle_reliability_mode == "semantic_branch_observation":
+                spatial_reliability_weight, spectral_reliability_weight, reliability_items = (
+                    self.semantic_branch_observation_reliability_weight(
+                        output_lrhsi,
+                        output_hrmsi,
+                        lr_hsi,
+                        hr_msi,
+                        target_hrhsi,
+                    )
+                )
+                reliability_weight = 0.5 * (
+                    spatial_reliability_weight + spectral_reliability_weight
+                )
             elif self.cycle_reliability_mode == "branch_specific_structure":
                 spatial_reliability_weight, spectral_reliability_weight, reliability_items = (
                     self.branch_specific_structure_reliability_weight(
