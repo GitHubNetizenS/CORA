@@ -6,7 +6,7 @@ CAVE:
     training_size: 64
     train_stride: 32
 #    train_stride: 64
-    seed: 42
+    seed: 43
     lr: 0.0001
     end_epoch: 1000
 #    end_epoch: 50
@@ -24,7 +24,7 @@ CAVE:
     # lambda_cycle: 0.0
     # use_ddl=false 时完全不实例化 DDL，用于提高消融实验速度。
     # use_base_degradation_consistency=false 时，基础损失中只保留边缘损失。
-    use_ddl: true
+    use_ddl: false
     use_base_degradation_consistency: true
     # 之前的 seed=42 base 续训配置：
     # experiment_name: cycle_only_0
@@ -62,8 +62,9 @@ CAVE:
     # experiment_name: 040_seed42_detached_observation_backprojection
     # experiment_name: 041_seed42_spectral_only_observation_backprojection
     # experiment_name: 050_seed42_shared_small_pullback_refinement
-    # 051：基于033，为空间/光谱cycle分别生成语义对应的可靠性图。
-    experiment_name: 051_seed42_semantic_branch_ob_rely
+    # experiment_name: 051_seed42_semantic_branch_ob_rely
+    # 052：复现022原始Baseline，仅将随机种子由42改为43。
+    experiment_name: 052_seed43_original_baseline_no_i1_no_ddl
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
