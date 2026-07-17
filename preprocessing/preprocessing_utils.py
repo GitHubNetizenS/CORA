@@ -1563,6 +1563,45 @@ class MultiScaleObservationReliabilityRefinement(nn.Module):
         return refined_weight
 
 
+class LocalObservationReliabilityRefinement(nn.Module):
+    """Bounded single-scale local refinement of an OB-Rely weight map."""
+    def __init__(self, modulation_limit=0.1):
+        super().__init__()
+        self.modulation_limit = float(modulation_limit)
+        self.refiner = nn.Sequential(
+            nn.Conv2d(2, 8, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(8, 8, kernel_size=3, padding=1, groups=8),
+            nn.GELU(),
+            nn.Conv2d(8, 1, kernel_size=1),
+        )
+        nn.init.zeros_(self.refiner[-1].weight)
+        nn.init.zeros_(self.refiner[-1].bias)
+        self.last_scale_weights = None
+        self.last_delta_abs_mean = None
+        self.last_delta_calibrated_abs_mean = None
+
+    def forward(self, pixel_error, structure_error, base_weight):
+        error_features = torch.cat([pixel_error, structure_error], dim=1)
+        delta = self.refiner(error_features)
+        modulation = 1.0 + self.modulation_limit * torch.tanh(delta)
+        refined_weight = base_weight * modulation
+        refined_weight = refined_weight / (
+            refined_weight.detach().mean(dim=(2, 3), keepdim=True) + 1e-6
+        )
+
+        # Keep the existing three-scale logging interface: this mode uses only
+        # the original-resolution 3x3 branch, so its diagnostic weight is one.
+        scale_weights = delta.new_zeros(
+            (delta.size(0), 3, delta.size(2), delta.size(3))
+        )
+        scale_weights[:, 0:1] = 1.0
+        self.last_scale_weights = scale_weights.detach()
+        self.last_delta_abs_mean = delta.detach().abs().mean()
+        self.last_delta_calibrated_abs_mean = self.last_delta_abs_mean
+        return refined_weight
+
+
 class NonCompetitiveMultiScaleObservationReliabilityRefinement(nn.Module):
     """Residual multi-scale OB-Rely refinement without zero-sum scale competition."""
     def __init__(self, modulation_limit=0.1):
@@ -1918,6 +1957,8 @@ class DualLearningLoss(nn.Module):
             self.reliability_refiner = MultiScaleObservationReliabilityRefinement(
                 use_scale_attention=True
             )
+        elif self.cycle_reliability_mode == "structure_local_refinement_observation":
+            self.reliability_refiner = LocalObservationReliabilityRefinement()
         elif self.cycle_reliability_mode == "structure_multiscale_equal_observation":
             self.reliability_refiner = MultiScaleObservationReliabilityRefinement(
                 use_scale_attention=False
@@ -2188,6 +2229,7 @@ class DualLearningLoss(nn.Module):
             observation_error = self._robust_normalize_observation_error(observation_error)
         elif self.cycle_reliability_mode in (
                 "structure_observation", "structure_multiscale_observation",
+                "structure_local_refinement_observation",
                 "structure_multiscale_equal_observation",
                 "structure_multiscale_calibrated_observation",
                 "structure_noncompetitive_multiscale_observation",
