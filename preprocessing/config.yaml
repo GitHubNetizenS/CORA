@@ -66,7 +66,9 @@ CAVE:
     # 052：复现022原始Baseline，仅将随机种子由42改为43。
     # experiment_name: 052_seed43_original_baseline_no_i1_no_ddl
     # 053：基于033，仅在OB-Rely中加入原尺度3x3局部精炼器，不使用尺度变换或多分支融合。
-    experiment_name: 053_seed42_local_ob_rely_refinement
+    # experiment_name: 053_seed42_local_ob_rely_refinement
+    # 054：使用独立输出目录，从零复现实验033的最佳结构与固定seed=42设置。
+    experiment_name: 054_seed42_reproduce_033_structure_ob_rely
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -96,7 +98,7 @@ CAVE:
     # 038：空间 branch 使用像素+Sobel结构可靠性，光谱 branch 仅使用像素观测可靠性。
     cycle_reliability_enable: true
     # 051：空间cycle由HRMSI像素/Sobel误差引导；光谱cycle由LRHSI像素/光谱差分误差引导。
-    cycle_reliability_mode: structure_local_refinement_observation
+    cycle_reliability_mode: structure_observation
     cycle_reliability_tau: 2.0
     cycle_reliability_min: 0.2
     cycle_reliability_normalize: true
