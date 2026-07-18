@@ -2155,6 +2155,14 @@ class DualLearningLoss(nn.Module):
         return torch.abs(pred_gradient - target_gradient).mean(dim=1, keepdim=True)
 
     @staticmethod
+    def _spectral_cosine_error(pred, target):
+        """Measure spectral-shape disagreement in the observed LRHSI domain."""
+        cosine = F.cosine_similarity(
+            pred.detach(), target.detach(), dim=1, eps=1e-6
+        ).unsqueeze(1)
+        return torch.clamp(1.0 - cosine, min=0.0, max=2.0)
+
+    @staticmethod
     def _haar_high_frequency(x):
         h_even = x.size(2) - (x.size(2) % 2)
         w_even = x.size(3) - (x.size(3) % 2)
@@ -2224,11 +2232,13 @@ class DualLearningLoss(nn.Module):
         pixel_lr_weight, structure_lr_weight, pixel_structure_weight = self.get_reliability_mix_weights()
         pixel_error = pixel_lr_weight * lr_error_for_weight + (1.0 - pixel_lr_weight) * ms_error_for_weight
         observation_error = pixel_error
+        spectral_shape_error_mean = reference.new_tensor(0.0)
 
         if self.cycle_reliability_mode == "robust_observation":
             observation_error = self._robust_normalize_observation_error(observation_error)
         elif self.cycle_reliability_mode in (
                 "structure_observation", "structure_multiscale_observation",
+                "spectral_structure_observation",
                 "structure_local_refinement_observation",
                 "structure_multiscale_equal_observation",
                 "structure_multiscale_calibrated_observation",
@@ -2247,10 +2257,30 @@ class DualLearningLoss(nn.Module):
                 structure_lr_weight * self._normalize_observation_error(lr_structure_hr)
                 + (1.0 - structure_lr_weight) * self._normalize_observation_error(ms_structure)
             )
-            observation_error = 2.0 * (
-                pixel_structure_weight * pixel_error
-                + (1.0 - pixel_structure_weight) * structure_error
-            )
+            if self.cycle_reliability_mode == "spectral_structure_observation":
+                spectral_shape_error = self._spectral_cosine_error(output_lrhsi, lr_hsi)
+                spectral_shape_error_mean = spectral_shape_error.mean().detach()
+                spectral_shape_error_hr = F.interpolate(
+                    spectral_shape_error,
+                    size=reference.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                spectral_shape_error_for_weight = self._normalize_observation_error(
+                    spectral_shape_error_hr
+                )
+                # P + 0.5*S + 0.5*A preserves the mean scale of the original
+                # P + S formulation while balancing spatial and spectral cues.
+                observation_error = (
+                    pixel_error
+                    + 0.5 * structure_error
+                    + 0.5 * spectral_shape_error_for_weight
+                )
+            else:
+                observation_error = 2.0 * (
+                    pixel_structure_weight * pixel_error
+                    + (1.0 - pixel_structure_weight) * structure_error
+                )
         elif self.cycle_reliability_mode == "frequency_observation":
             lr_hf = self._haar_error(output_lrhsi, lr_hsi)
             lr_hf_hr = F.interpolate(
@@ -2287,6 +2317,7 @@ class DualLearningLoss(nn.Module):
             "spectral_reliability_weight_max": reliability.amax().detach(),
             "obs_lr_error_mean": lr_error_hr.mean().detach(),
             "obs_ms_error_mean": ms_error.mean().detach(),
+            "obs_spectral_shape_error_mean": spectral_shape_error_mean,
             "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
             "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
             "ob_rely_pixel_lr_weight": pixel_lr_weight.detach(),
@@ -2799,6 +2830,9 @@ class DualLearningLoss(nn.Module):
             "spectral_reliability_weight_max": reliability_items["spectral_reliability_weight_max"],
             "obs_lr_error_mean": reliability_items["obs_lr_error_mean"],
             "obs_ms_error_mean": reliability_items["obs_ms_error_mean"],
+            "obs_spectral_shape_error_mean": reliability_items.get(
+                "obs_spectral_shape_error_mean", output_hrhsi.new_tensor(0.0)
+            ),
             "cross_spatial_ms_error_mean": reliability_items["cross_spatial_ms_error_mean"],
             "cross_spectral_lr_error_mean": reliability_items["cross_spectral_lr_error_mean"],
             "ob_rely_pixel_lr_weight": reliability_items["ob_rely_pixel_lr_weight"],
