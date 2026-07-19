@@ -2325,6 +2325,120 @@ class DualLearningLoss(nn.Module):
             "ob_rely_pixel_structure_weight": pixel_structure_weight.detach(),
         }
 
+    def branch_targeted_spectral_reliability_weight(
+            self, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, reference):
+        """仅用光谱形状误差增强光谱拉回支路的可靠性估计。"""
+        if not self.cycle_reliability_enable:
+            weight = reference.new_ones(
+                reference.size(0), 1, reference.size(2), reference.size(3)
+            )
+            return weight, weight, {
+                "reliability_weight_mean": weight.mean().detach(),
+                "reliability_weight_min": weight.amin().detach(),
+                "reliability_weight_max": weight.amax().detach(),
+                "spatial_reliability_weight_mean": weight.mean().detach(),
+                "spatial_reliability_weight_min": weight.amin().detach(),
+                "spatial_reliability_weight_max": weight.amax().detach(),
+                "spectral_reliability_weight_mean": weight.mean().detach(),
+                "spectral_reliability_weight_min": weight.amin().detach(),
+                "spectral_reliability_weight_max": weight.amax().detach(),
+                "obs_lr_error_mean": reference.new_tensor(0.0),
+                "obs_ms_error_mean": reference.new_tensor(0.0),
+                "obs_spectral_shape_error_mean": reference.new_tensor(0.0),
+                "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
+                "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+                "ob_rely_pixel_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_structure_lr_weight": reference.new_tensor(0.5),
+                "ob_rely_pixel_structure_weight": reference.new_tensor(0.5),
+            }
+
+        lr_error = torch.mean(
+            torch.abs(output_lrhsi.detach() - lr_hsi), dim=1, keepdim=True
+        )
+        lr_error_hr = F.interpolate(
+            lr_error,
+            size=reference.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        ms_error = torch.mean(
+            torch.abs(output_hrmsi.detach() - hr_msi), dim=1, keepdim=True
+        )
+
+        lr_error_for_weight = self._normalize_observation_error(lr_error_hr)
+        ms_error_for_weight = self._normalize_observation_error(ms_error)
+        pixel_lr_weight, structure_lr_weight, pixel_structure_weight = (
+            self.get_reliability_mix_weights()
+        )
+        pixel_error = (
+            pixel_lr_weight * lr_error_for_weight
+            + (1.0 - pixel_lr_weight) * ms_error_for_weight
+        )
+
+        lr_structure = self._sobel_error(output_lrhsi, lr_hsi)
+        lr_structure_hr = F.interpolate(
+            lr_structure,
+            size=reference.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        ms_structure = self._sobel_error(output_hrmsi, hr_msi)
+        structure_error = (
+            structure_lr_weight * self._normalize_observation_error(lr_structure_hr)
+            + (1.0 - structure_lr_weight) * self._normalize_observation_error(ms_structure)
+        )
+
+        # 空间支路严格保持实验033的 P+S 可靠性，不受光谱角误差影响。
+        spatial_observation_error = 2.0 * (
+            pixel_structure_weight * pixel_error
+            + (1.0 - pixel_structure_weight) * structure_error
+        )
+
+        spectral_shape_error = self._spectral_cosine_error(output_lrhsi, lr_hsi)
+        spectral_shape_error_hr = F.interpolate(
+            spectral_shape_error,
+            size=reference.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        spectral_shape_error_for_weight = self._normalize_observation_error(
+            spectral_shape_error_hr
+        )
+        # 光谱支路沿用实验055的 P+0.5*S+0.5*A 可靠性。
+        spectral_observation_error = (
+            pixel_error
+            + 0.5 * structure_error
+            + 0.5 * spectral_shape_error_for_weight
+        )
+
+        spatial_weight = self._observation_error_to_reliability(
+            spatial_observation_error, detach_result=False
+        )
+        spectral_weight = self._observation_error_to_reliability(
+            spectral_observation_error, detach_result=False
+        )
+        combined_weight = 0.5 * (spatial_weight + spectral_weight)
+
+        return spatial_weight, spectral_weight, {
+            "reliability_weight_mean": combined_weight.mean().detach(),
+            "reliability_weight_min": combined_weight.amin().detach(),
+            "reliability_weight_max": combined_weight.amax().detach(),
+            "spatial_reliability_weight_mean": spatial_weight.mean().detach(),
+            "spatial_reliability_weight_min": spatial_weight.amin().detach(),
+            "spatial_reliability_weight_max": spatial_weight.amax().detach(),
+            "spectral_reliability_weight_mean": spectral_weight.mean().detach(),
+            "spectral_reliability_weight_min": spectral_weight.amin().detach(),
+            "spectral_reliability_weight_max": spectral_weight.amax().detach(),
+            "obs_lr_error_mean": lr_error_hr.mean().detach(),
+            "obs_ms_error_mean": ms_error.mean().detach(),
+            "obs_spectral_shape_error_mean": spectral_shape_error.mean().detach(),
+            "cross_spatial_ms_error_mean": reference.new_tensor(0.0),
+            "cross_spectral_lr_error_mean": reference.new_tensor(0.0),
+            "ob_rely_pixel_lr_weight": pixel_lr_weight.detach(),
+            "ob_rely_structure_lr_weight": structure_lr_weight.detach(),
+            "ob_rely_pixel_structure_weight": pixel_structure_weight.detach(),
+        }
+
     def semantic_branch_observation_reliability_weight(
             self, output_lrhsi, output_hrmsi, lr_hsi, hr_msi, reference):
         """Use modality-specific evidence to weight the two pullback cycles."""
@@ -2690,6 +2804,19 @@ class DualLearningLoss(nn.Module):
                     )
                 )
                 reliability_weight = 0.5 * (spatial_reliability_weight + spectral_reliability_weight)
+            elif self.cycle_reliability_mode == "branch_targeted_spectral_observation":
+                spatial_reliability_weight, spectral_reliability_weight, reliability_items = (
+                    self.branch_targeted_spectral_reliability_weight(
+                        output_lrhsi,
+                        output_hrmsi,
+                        lr_hsi,
+                        hr_msi,
+                        target_hrhsi,
+                    )
+                )
+                reliability_weight = 0.5 * (
+                    spatial_reliability_weight + spectral_reliability_weight
+                )
             else:
                 reliability_weight, reliability_items = self.observation_reliability_weight(
                     output_lrhsi,
