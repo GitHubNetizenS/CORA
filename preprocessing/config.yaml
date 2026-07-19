@@ -6,7 +6,7 @@ CAVE:
     training_size: 64
     train_stride: 32
 #    train_stride: 64
-    seed: 42
+    seed: 43
     lr: 0.0001
     end_epoch: 1000
 #    end_epoch: 50
@@ -70,7 +70,9 @@ CAVE:
     # 054：使用独立输出目录，从零复现实验033的最佳结构与固定seed=42设置。
     # experiment_name: 054_seed42_reproduce_033_structure_ob_rely
     # 055：基于033，在OB-Rely中加入真实LRHSI观测域的光谱形状可靠性。
-    experiment_name: 055_seed42_spectral_structure_ob_rely
+    # experiment_name: 055_seed42_spectral_structure_ob_rely
+    # 056：完全复现055，仅将随机种子由42改为43，用于和037进行成对验证。
+    experiment_name: 056_seed43_spectral_structure_ob_rely
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
