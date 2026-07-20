@@ -74,7 +74,9 @@ CAVE:
     # 056：完全复现055，仅将随机种子由42改为43，用于和037进行成对验证。
     # experiment_name: 056_seed43_spectral_structure_ob_rely
     # 057：空间cycle保持033可靠性，仅对光谱cycle加入055的光谱形状可靠性。
-    experiment_name: 057_seed42_branch_targeted_spectral_reliability
+    # experiment_name: 057_seed42_branch_targeted_spectral_reliability
+    # 058：基于033加入D4旋转/翻转等变一致性，不改变ORDP内部结构与固定权重。
+    experiment_name: 058_seed42_ordp_equivariant_consistency
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -104,12 +106,14 @@ CAVE:
     # 038：空间 branch 使用像素+Sobel结构可靠性，光谱 branch 仅使用像素观测可靠性。
     cycle_reliability_enable: true
     # 051：空间cycle由HRMSI像素/Sobel误差引导；光谱cycle由LRHSI像素/光谱差分误差引导。
-    cycle_reliability_mode: branch_targeted_spectral_observation
+    cycle_reliability_mode: structure_observation
     cycle_reliability_tau: 2.0
     cycle_reliability_min: 0.2
     cycle_reliability_normalize: true
     cycle_reliability_apply_to_branches: true
     cycle_reliability_learnable_mix: false
+    equivariance_enable: true
+    lambda_equivariance: 0.001
     output_refinement_enable: false
     # 016：observation target correction，017 中关闭。
     # observation_target_correction_enable: true

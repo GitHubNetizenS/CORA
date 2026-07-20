@@ -186,6 +186,18 @@ def get_cycle_schedule_scale(epoch, warmup_epoch, decay_start_epoch, end_epoch, 
     return 1.0
 
 
+def apply_d4_transform(tensor, transform_id):
+    """Apply one of eight right-angle rotation/reflection transforms."""
+    transform_id = int(transform_id)
+    rotation_k = transform_id % 4
+    use_horizontal_flip = transform_id >= 4
+    transformed = torch.rot90(tensor, rotation_k, dims=(-2, -1))
+    if use_horizontal_flip:
+        transformed = torch.flip(transformed, dims=(-1,))
+    # DAConv CUDA算子可能要求连续内存，因此在进入模型前显式整理布局。
+    return transformed.contiguous()
+
+
 def apply_cycle_schedule(dual_loss, epoch, end_epoch, base_cycle_weights, schedule_cfg):
     """Update DDL cycle weights in-place while keeping Jacobian weights unchanged."""
     if dual_loss is None or not schedule_cfg["enabled"]:
@@ -240,6 +252,11 @@ if "__main__"==__name__:
     cycle_reliability_normalize = bool(cfg["train"].get("cycle_reliability_normalize", True))
     cycle_reliability_apply_to_branches = bool(cfg["train"].get("cycle_reliability_apply_to_branches", False))
     cycle_reliability_learnable_mix = bool(cfg["train"].get("cycle_reliability_learnable_mix", False))
+    equivariance_enable = bool(cfg["train"].get("equivariance_enable", False))
+    lambda_equivariance = float(cfg["train"].get("lambda_equivariance", 0.0))
+    # 使用独立随机数流，避免等变变换采样改变DataLoader的shuffle顺序。
+    equivariance_generator = torch.Generator()
+    equivariance_generator.manual_seed(seed)
     output_refinement_enable = bool(cfg["train"].get("output_refinement_enable", False))
     observation_target_correction_enable = bool(cfg["train"].get("observation_target_correction_enable", False))
     observation_target_correction_eta = float(cfg["train"].get("observation_target_correction_eta", 0.05))
@@ -370,7 +387,9 @@ if "__main__"==__name__:
                                        "pullback_refine_spatial_abs_mean", "pullback_refine_spectral_abs_mean",
                                        "target_corr_delta_spatial_mean", "target_corr_delta_spectral_mean",
                                        "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta",
-                                       "bp_spatial_delta_mean", "bp_spectral_delta_mean"])
+                                       "bp_spatial_delta_mean", "bp_spectral_delta_mean",
+                                       "lambda_equivariance", "loss_equivariance",
+                                       "equivariance_eff", "equivariance_ratio"])
         df.to_csv(excel_path, index=False)
     # ===========================================================================================
     # 1. 构造训练数据集和 DataLoader。
@@ -474,6 +493,9 @@ if "__main__"==__name__:
         jac_active_count = 0
         jac_loss_epoch_sum = 0.0
         jac_eff_epoch_sum = 0.0
+        equivariance_loss_epoch_sum = 0.0
+        equivariance_eff_epoch_sum = 0.0
+        equivariance_ratio_epoch_sum = 0.0
         batch_count = 0
         loop = tqdm(train_loader, total=len(train_loader))
         start_time = time.time()
@@ -550,6 +572,32 @@ if "__main__"==__name__:
                 compute_jac = False
                 loss_ddl = output_hrhsi.new_tensor(0.0)
                 loss_ddl_items = make_zero_ddl_items(output_hrhsi)
+
+            # 等变一致性：同一组空间旋转/翻转同时作用于LRHSI、HRMSI与HRHSI输出。
+            # 仅对变换输入分支反向传播，原始输出作为stop-gradient目标。
+            if equivariance_enable and lambda_equivariance > 0.0:
+                transform_id = int(torch.randint(
+                    1, 8, (1,), generator=equivariance_generator
+                ).item())
+                transformed_lr_hsi = apply_d4_transform(lr_hsi, transform_id)
+                transformed_hr_msi = apply_d4_transform(hr_msi, transform_id)
+                transformed_output_hrhsi, _, _, _ = model(
+                    transformed_lr_hsi, transformed_hr_msi
+                )
+                if dual_loss is not None:
+                    transformed_output_hrhsi = dual_loss.refine_hrhsi(
+                        transformed_output_hrhsi
+                    )
+                equivariance_target = apply_d4_transform(
+                    output_hrhsi.detach(), transform_id
+                )
+                loss_equivariance = F.l1_loss(
+                    transformed_output_hrhsi, equivariance_target
+                )
+            else:
+                loss_equivariance = output_hrhsi.new_tensor(0.0)
+            equivariance_eff = lambda_equivariance * loss_equivariance
+
             batch_count += 1
             if compute_jac:
                 jac_active_count += 1
@@ -557,7 +605,14 @@ if "__main__"==__name__:
             jac_eff_epoch_sum += loss_ddl_items["jac_eff"].item()
             # 历史尝试包括固定 lambda_ddl、全局可学习 base/DDL 权重和单个可学习 DDL 权重。
             # 当前版本统一在 DualLearningLoss 内部用固定权重组合 DDL 子项。
-            loss = loss_base + loss_ddl
+            loss = loss_base + loss_ddl + equivariance_eff
+            loss_denom = abs(loss.detach().item())
+            if loss_denom < 1e-12:
+                loss_denom = 1e-12
+            equivariance_ratio = equivariance_eff.detach().item() / loss_denom
+            equivariance_loss_epoch_sum += loss_equivariance.detach().item()
+            equivariance_eff_epoch_sum += equivariance_eff.detach().item()
+            equivariance_ratio_epoch_sum += equivariance_ratio
             # ===========================================================================================
             # 旧版消融中曾测试 L1/Charbonnier/动态边缘权重等替代损失。
             # 当前收敛版本不再启用这些分支，保留说明即可。
@@ -581,7 +636,7 @@ if "__main__"==__name__:
                               "ddl":    f"{loss_ddl_items['ddl'].item():.8f}",
                               "cyc":    f"{loss_ddl_items['cycle_eff'].item():.8f}",
                               "jac":    f"{loss_ddl_items['jac_eff'].item():.8f}",
-                              "tshift": f"{loss_ddl_items['target_corr_shift_mean'].item():.6f}",
+                              "eq":     f"{equivariance_eff.item():.8f}",
                               "lr":     f"{lr_now:.8f}"})
         scheduler.step()
 
@@ -686,6 +741,9 @@ if "__main__"==__name__:
             jac_active_ratio = jac_active_count / jac_stat_count
             mean_jac_loss = jac_loss_epoch_sum / jac_stat_count
             mean_jac_eff = jac_eff_epoch_sum / jac_stat_count
+            mean_equivariance_loss = equivariance_loss_epoch_sum / jac_stat_count
+            mean_equivariance_eff = equivariance_eff_epoch_sum / jac_stat_count
+            mean_equivariance_ratio = equivariance_ratio_epoch_sum / jac_stat_count
             if legacy_cycle_only_log:
                 val_list = [epoch, optimizer.param_groups[0]["lr"], np.mean(loss_all), val_loss_meter.avg,
                             rmse_meter.avg, psnr_meter.avg, sam_meter.avg, ssim_meter.avg, ergas_meter.avg,
@@ -758,7 +816,11 @@ if "__main__"==__name__:
                             loss_ddl_items["target_corr_shift_max"].item(),
                             loss_ddl_items["target_corr_eta"].item(),
                             loss_ddl_items["bp_spatial_delta_mean"].item(),
-                            loss_ddl_items["bp_spectral_delta_mean"].item()]
+                            loss_ddl_items["bp_spectral_delta_mean"].item(),
+                            lambda_equivariance,
+                            mean_equivariance_loss,
+                            mean_equivariance_eff,
+                            mean_equivariance_ratio]
             val_data = pd.DataFrame([val_list])
 
             val_data.to_csv(excel_path, mode='a', header=False, index=False)
