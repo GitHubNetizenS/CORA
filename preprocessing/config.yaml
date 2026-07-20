@@ -76,7 +76,8 @@ CAVE:
     # 057：空间cycle保持033可靠性，仅对光谱cycle加入055的光谱形状可靠性。
     # experiment_name: 057_seed42_branch_targeted_spectral_reliability
     # 058：基于033加入D4旋转/翻转等变一致性，不改变ORDP内部结构与固定权重。
-    experiment_name: 058_seed42_ordp_equivariant_consistency
+    # 059：基于033实现EI式物理闭环等变一致性，与058的输入等变约束形成严格对照。
+    experiment_name: 059_seed42_ordp_physics_equivariant_cycle
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -113,6 +114,7 @@ CAVE:
     cycle_reliability_apply_to_branches: true
     cycle_reliability_learnable_mix: false
     equivariance_enable: true
+    equivariance_mode: physics_cycle
     lambda_equivariance: 0.001
     output_refinement_enable: false
     # 016：observation target correction，017 中关闭。

@@ -253,6 +253,12 @@ if "__main__"==__name__:
     cycle_reliability_apply_to_branches = bool(cfg["train"].get("cycle_reliability_apply_to_branches", False))
     cycle_reliability_learnable_mix = bool(cfg["train"].get("cycle_reliability_learnable_mix", False))
     equivariance_enable = bool(cfg["train"].get("equivariance_enable", False))
+    equivariance_mode = cfg["train"].get("equivariance_mode", "input_transform")
+    if equivariance_mode not in {"input_transform", "physics_cycle"}:
+        raise ValueError(
+            f"不支持的equivariance_mode: {equivariance_mode}，"
+            "可选值为input_transform或physics_cycle。"
+        )
     lambda_equivariance = float(cfg["train"].get("lambda_equivariance", 0.0))
     # 使用独立随机数流，避免等变变换采样改变DataLoader的shuffle顺序。
     equivariance_generator = torch.Generator()
@@ -573,27 +579,47 @@ if "__main__"==__name__:
                 loss_ddl = output_hrhsi.new_tensor(0.0)
                 loss_ddl_items = make_zero_ddl_items(output_hrhsi)
 
-            # 等变一致性：同一组空间旋转/翻转同时作用于LRHSI、HRMSI与HRHSI输出。
-            # 仅对变换输入分支反向传播，原始输出作为stop-gradient目标。
+            # 等变一致性支持两种消融模式：
+            # input_transform：实验058的输入等变约束；
+            # physics_cycle：实验059参考EI，通过变换预测、双物理退化和再次重建形成闭环。
             if equivariance_enable and lambda_equivariance > 0.0:
                 transform_id = int(torch.randint(
                     1, 8, (1,), generator=equivariance_generator
                 ).item())
-                transformed_lr_hsi = apply_d4_transform(lr_hsi, transform_id)
-                transformed_hr_msi = apply_d4_transform(hr_msi, transform_id)
-                transformed_output_hrhsi, _, _, _ = model(
-                    transformed_lr_hsi, transformed_hr_msi
-                )
-                if dual_loss is not None:
-                    transformed_output_hrhsi = dual_loss.refine_hrhsi(
-                        transformed_output_hrhsi
+                if equivariance_mode == "input_transform":
+                    transformed_lr_hsi = apply_d4_transform(lr_hsi, transform_id)
+                    transformed_hr_msi = apply_d4_transform(hr_msi, transform_id)
+                    transformed_output_hrhsi, _, _, _ = model(
+                        transformed_lr_hsi, transformed_hr_msi
                     )
-                equivariance_target = apply_d4_transform(
-                    output_hrhsi.detach(), transform_id
-                )
-                loss_equivariance = F.l1_loss(
-                    transformed_output_hrhsi, equivariance_target
-                )
+                    if dual_loss is not None:
+                        transformed_output_hrhsi = dual_loss.refine_hrhsi(
+                            transformed_output_hrhsi
+                        )
+                    equivariance_target = apply_d4_transform(
+                        output_hrhsi.detach(), transform_id
+                    )
+                    loss_equivariance = F.l1_loss(
+                        transformed_output_hrhsi, equivariance_target
+                    )
+                else:
+                    # EI原始训练闭环：x2=T(x1)，x3=f(A(x2))，约束x3与x2一致。
+                    # 不对x2执行detach，保留原始EI两侧共同反向传播的设计。
+                    equivariance_target = apply_d4_transform(
+                        output_hrhsi, transform_id
+                    )
+                    transformed_lr_hsi = spatial_down(equivariance_target)
+                    transformed_hr_msi = spectral_down(equivariance_target)
+                    transformed_output_hrhsi, _, _, _ = model(
+                        transformed_lr_hsi, transformed_hr_msi
+                    )
+                    if dual_loss is not None:
+                        transformed_output_hrhsi = dual_loss.refine_hrhsi(
+                            transformed_output_hrhsi
+                        )
+                    loss_equivariance = F.l1_loss(
+                        transformed_output_hrhsi, equivariance_target
+                    )
             else:
                 loss_equivariance = output_hrhsi.new_tensor(0.0)
             equivariance_eff = lambda_equivariance * loss_equivariance
