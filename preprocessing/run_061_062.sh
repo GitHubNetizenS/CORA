@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_CONFIG="${SCRIPT_DIR}/config.yaml"
 QUEUE_FILE="${SCRIPT_DIR}/experiment_queues/queue_061_062.yaml"
 GENERATED_DIR="${SCRIPT_DIR}/experiment_queues/generated_configs_061_062"
@@ -9,6 +10,8 @@ PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/bin/python}"
 WAIT_PID="${WAIT_PID:-}"
 GPU_INDEX="${GPU_INDEX:-}"
 DRY_RUN=0
+
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
