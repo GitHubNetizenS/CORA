@@ -1,0 +1,66 @@
+experiments:
+  - name: 061_seed42_058_main_spectral_anchor
+    train:
+      seed: 42
+      end_epoch: 1000
+      use_ddl: true
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_fixed_legacy_spatial_v1
+      lambda_cycle_spatial: 0.001
+      lambda_cycle_spectral: 0.001
+      lambda_cycle_fused: 0.0
+      lambda_jac_spatial: 0.003
+      lambda_jac_spectral: 0.0003
+      jac_interval: 10
+      spectral_pullback_learnable: false
+      cycle_schedule_enable: false
+      cycle_reliability_enable: true
+      cycle_reliability_mode: structure_observation
+      cycle_reliability_tau: 2.0
+      cycle_reliability_min: 0.2
+      cycle_reliability_normalize: true
+      cycle_reliability_apply_to_branches: true
+      cycle_reliability_learnable_mix: false
+      equivariance_enable: true
+      equivariance_mode: input_transform
+      lambda_equivariance: 0.001
+      spectral_shape_loss_enable: true
+      spectral_shape_loss_scope: main
+      lambda_spectral_shape: 0.001
+      output_refinement_enable: false
+      observation_target_correction_enable: false
+      beta_spatial_bp: 0.0
+      beta_spectral_bp: 0.0
+
+  - name: 062_seed42_058_symmetric_spectral_anchor
+    train:
+      seed: 42
+      end_epoch: 1000
+      use_ddl: true
+      use_base_degradation_consistency: true
+      pullback_mode: dual_pullback_fixed_legacy_spatial_v1
+      lambda_cycle_spatial: 0.001
+      lambda_cycle_spectral: 0.001
+      lambda_cycle_fused: 0.0
+      lambda_jac_spatial: 0.003
+      lambda_jac_spectral: 0.0003
+      jac_interval: 10
+      spectral_pullback_learnable: false
+      cycle_schedule_enable: false
+      cycle_reliability_enable: true
+      cycle_reliability_mode: structure_observation
+      cycle_reliability_tau: 2.0
+      cycle_reliability_min: 0.2
+      cycle_reliability_normalize: true
+      cycle_reliability_apply_to_branches: true
+      cycle_reliability_learnable_mix: false
+      equivariance_enable: true
+      equivariance_mode: input_transform
+      lambda_equivariance: 0.001
+      spectral_shape_loss_enable: true
+      spectral_shape_loss_scope: symmetric
+      lambda_spectral_shape: 0.001
+      output_refinement_enable: false
+      observation_target_correction_enable: false
+      beta_spatial_bp: 0.0
+      beta_spectral_bp: 0.0

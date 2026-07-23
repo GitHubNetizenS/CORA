@@ -198,6 +198,17 @@ def apply_d4_transform(tensor, transform_id):
     return transformed.contiguous()
 
 
+def spectral_shape_consistency(predicted_lrhsi, observed_lrhsi):
+    """Measure per-pixel spectral-shape disagreement in the real LRHSI domain."""
+    cosine_similarity = F.cosine_similarity(
+        predicted_lrhsi,
+        observed_lrhsi,
+        dim=1,
+        eps=1e-8,
+    )
+    return torch.mean(1.0 - cosine_similarity)
+
+
 def apply_cycle_schedule(dual_loss, epoch, end_epoch, base_cycle_weights, schedule_cfg):
     """Update DDL cycle weights in-place while keeping Jacobian weights unchanged."""
     if dual_loss is None or not schedule_cfg["enabled"]:
@@ -260,6 +271,27 @@ if "__main__"==__name__:
             "可选值为input_transform或physics_cycle。"
         )
     lambda_equivariance = float(cfg["train"].get("lambda_equivariance", 0.0))
+    spectral_shape_loss_enable = bool(cfg["train"].get("spectral_shape_loss_enable", False))
+    spectral_shape_loss_scope = cfg["train"].get("spectral_shape_loss_scope", "main")
+    if spectral_shape_loss_scope not in {"main", "symmetric"}:
+        raise ValueError(
+            f"不支持的spectral_shape_loss_scope: {spectral_shape_loss_scope}，"
+            "可选值为main或symmetric。"
+        )
+    lambda_spectral_shape = float(cfg["train"].get("lambda_spectral_shape", 0.0))
+    if (
+            spectral_shape_loss_enable
+            and spectral_shape_loss_scope == "symmetric"
+            and (
+                not equivariance_enable
+                or equivariance_mode != "input_transform"
+                or lambda_equivariance <= 0.0
+            )
+    ):
+        raise ValueError(
+            "symmetric光谱形状约束需要启用input_transform等变分支，"
+            "且lambda_equivariance必须大于0。"
+        )
     # 使用独立随机数流，避免等变变换采样改变DataLoader的shuffle顺序。
     equivariance_generator = torch.Generator()
     equivariance_generator.manual_seed(seed)
@@ -395,7 +427,10 @@ if "__main__"==__name__:
                                        "target_corr_shift_mean", "target_corr_shift_max", "target_corr_eta",
                                        "bp_spatial_delta_mean", "bp_spectral_delta_mean",
                                        "lambda_equivariance", "loss_equivariance",
-                                       "equivariance_eff", "equivariance_ratio"])
+                                       "equivariance_eff", "equivariance_ratio",
+                                       "lambda_spectral_shape", "loss_spectral_shape_main",
+                                       "loss_spectral_shape_d4", "loss_spectral_shape",
+                                       "spectral_shape_eff", "spectral_shape_ratio"])
         df.to_csv(excel_path, index=False)
     # ===========================================================================================
     # 1. 构造训练数据集和 DataLoader。
@@ -502,6 +537,11 @@ if "__main__"==__name__:
         equivariance_loss_epoch_sum = 0.0
         equivariance_eff_epoch_sum = 0.0
         equivariance_ratio_epoch_sum = 0.0
+        spectral_shape_main_epoch_sum = 0.0
+        spectral_shape_d4_epoch_sum = 0.0
+        spectral_shape_loss_epoch_sum = 0.0
+        spectral_shape_eff_epoch_sum = 0.0
+        spectral_shape_ratio_epoch_sum = 0.0
         batch_count = 0
         loop = tqdm(train_loader, total=len(train_loader))
         start_time = time.time()
@@ -624,6 +664,35 @@ if "__main__"==__name__:
                 loss_equivariance = output_hrhsi.new_tensor(0.0)
             equivariance_eff = lambda_equivariance * loss_equivariance
 
+            # 061/062：直接在真实LRHSI观测域约束光谱曲线形状。
+            # 061只约束主分支；062同时约束D4分支，并取均值保持总权重尺度一致。
+            if spectral_shape_loss_enable and lambda_spectral_shape > 0.0:
+                loss_spectral_shape_main = spectral_shape_consistency(
+                    output_lrhsi,
+                    lr_hsi,
+                )
+                if spectral_shape_loss_scope == "symmetric":
+                    transformed_output_lrhsi = spatial_down(transformed_output_hrhsi)
+                    transformed_observed_lrhsi = apply_d4_transform(
+                        lr_hsi,
+                        transform_id,
+                    )
+                    loss_spectral_shape_d4 = spectral_shape_consistency(
+                        transformed_output_lrhsi,
+                        transformed_observed_lrhsi,
+                    )
+                    loss_spectral_shape = 0.5 * (
+                        loss_spectral_shape_main + loss_spectral_shape_d4
+                    )
+                else:
+                    loss_spectral_shape_d4 = output_hrhsi.new_tensor(0.0)
+                    loss_spectral_shape = loss_spectral_shape_main
+            else:
+                loss_spectral_shape_main = output_hrhsi.new_tensor(0.0)
+                loss_spectral_shape_d4 = output_hrhsi.new_tensor(0.0)
+                loss_spectral_shape = output_hrhsi.new_tensor(0.0)
+            spectral_shape_eff = lambda_spectral_shape * loss_spectral_shape
+
             batch_count += 1
             if compute_jac:
                 jac_active_count += 1
@@ -631,7 +700,7 @@ if "__main__"==__name__:
             jac_eff_epoch_sum += loss_ddl_items["jac_eff"].item()
             # 历史尝试包括固定 lambda_ddl、全局可学习 base/DDL 权重和单个可学习 DDL 权重。
             # 当前版本统一在 DualLearningLoss 内部用固定权重组合 DDL 子项。
-            loss = loss_base + loss_ddl + equivariance_eff
+            loss = loss_base + loss_ddl + equivariance_eff + spectral_shape_eff
             loss_denom = abs(loss.detach().item())
             if loss_denom < 1e-12:
                 loss_denom = 1e-12
@@ -639,6 +708,12 @@ if "__main__"==__name__:
             equivariance_loss_epoch_sum += loss_equivariance.detach().item()
             equivariance_eff_epoch_sum += equivariance_eff.detach().item()
             equivariance_ratio_epoch_sum += equivariance_ratio
+            spectral_shape_ratio = spectral_shape_eff.detach().item() / loss_denom
+            spectral_shape_main_epoch_sum += loss_spectral_shape_main.detach().item()
+            spectral_shape_d4_epoch_sum += loss_spectral_shape_d4.detach().item()
+            spectral_shape_loss_epoch_sum += loss_spectral_shape.detach().item()
+            spectral_shape_eff_epoch_sum += spectral_shape_eff.detach().item()
+            spectral_shape_ratio_epoch_sum += spectral_shape_ratio
             # ===========================================================================================
             # 旧版消融中曾测试 L1/Charbonnier/动态边缘权重等替代损失。
             # 当前收敛版本不再启用这些分支，保留说明即可。
@@ -663,6 +738,7 @@ if "__main__"==__name__:
                               "cyc":    f"{loss_ddl_items['cycle_eff'].item():.8f}",
                               "jac":    f"{loss_ddl_items['jac_eff'].item():.8f}",
                               "eq":     f"{equivariance_eff.item():.8f}",
+                              "spe":    f"{spectral_shape_eff.item():.8f}",
                               "lr":     f"{lr_now:.8f}"})
         scheduler.step()
 
@@ -770,6 +846,11 @@ if "__main__"==__name__:
             mean_equivariance_loss = equivariance_loss_epoch_sum / jac_stat_count
             mean_equivariance_eff = equivariance_eff_epoch_sum / jac_stat_count
             mean_equivariance_ratio = equivariance_ratio_epoch_sum / jac_stat_count
+            mean_spectral_shape_main = spectral_shape_main_epoch_sum / jac_stat_count
+            mean_spectral_shape_d4 = spectral_shape_d4_epoch_sum / jac_stat_count
+            mean_spectral_shape_loss = spectral_shape_loss_epoch_sum / jac_stat_count
+            mean_spectral_shape_eff = spectral_shape_eff_epoch_sum / jac_stat_count
+            mean_spectral_shape_ratio = spectral_shape_ratio_epoch_sum / jac_stat_count
             if legacy_cycle_only_log:
                 val_list = [epoch, optimizer.param_groups[0]["lr"], np.mean(loss_all), val_loss_meter.avg,
                             rmse_meter.avg, psnr_meter.avg, sam_meter.avg, ssim_meter.avg, ergas_meter.avg,
@@ -846,7 +927,13 @@ if "__main__"==__name__:
                             lambda_equivariance,
                             mean_equivariance_loss,
                             mean_equivariance_eff,
-                            mean_equivariance_ratio]
+                            mean_equivariance_ratio,
+                            lambda_spectral_shape,
+                            mean_spectral_shape_main,
+                            mean_spectral_shape_d4,
+                            mean_spectral_shape_loss,
+                            mean_spectral_shape_eff,
+                            mean_spectral_shape_ratio]
             val_data = pd.DataFrame([val_list])
 
             val_data.to_csv(excel_path, mode='a', header=False, index=False)
