@@ -265,10 +265,14 @@ if "__main__"==__name__:
     cycle_reliability_learnable_mix = bool(cfg["train"].get("cycle_reliability_learnable_mix", False))
     equivariance_enable = bool(cfg["train"].get("equivariance_enable", False))
     equivariance_mode = cfg["train"].get("equivariance_mode", "input_transform")
-    if equivariance_mode not in {"input_transform", "physics_cycle"}:
+    if equivariance_mode not in {
+            "input_transform",
+            "physics_cycle",
+            "transformed_observation",
+    }:
         raise ValueError(
             f"不支持的equivariance_mode: {equivariance_mode}，"
-            "可选值为input_transform或physics_cycle。"
+            "可选值为input_transform、physics_cycle或transformed_observation。"
         )
     lambda_equivariance = float(cfg["train"].get("lambda_equivariance", 0.0))
     spectral_shape_loss_enable = bool(cfg["train"].get("spectral_shape_loss_enable", False))
@@ -430,7 +434,12 @@ if "__main__"==__name__:
                                        "equivariance_eff", "equivariance_ratio",
                                        "lambda_spectral_shape", "loss_spectral_shape_main",
                                        "loss_spectral_shape_d4", "loss_spectral_shape",
-                                       "spectral_shape_eff", "spectral_shape_ratio"])
+                                       "spectral_shape_eff", "spectral_shape_ratio",
+                                       "loss_transformed_obs_spatial",
+                                       "loss_transformed_obs_spectral",
+                                       "loss_transformed_observation",
+                                       "transformed_observation_eff",
+                                       "transformed_observation_ratio"])
         df.to_csv(excel_path, index=False)
     # ===========================================================================================
     # 1. 构造训练数据集和 DataLoader。
@@ -542,6 +551,11 @@ if "__main__"==__name__:
         spectral_shape_loss_epoch_sum = 0.0
         spectral_shape_eff_epoch_sum = 0.0
         spectral_shape_ratio_epoch_sum = 0.0
+        transformed_obs_spatial_epoch_sum = 0.0
+        transformed_obs_spectral_epoch_sum = 0.0
+        transformed_observation_epoch_sum = 0.0
+        transformed_observation_eff_epoch_sum = 0.0
+        transformed_observation_ratio_epoch_sum = 0.0
         batch_count = 0
         loop = tqdm(train_loader, total=len(train_loader))
         start_time = time.time()
@@ -619,10 +633,19 @@ if "__main__"==__name__:
                 loss_ddl = output_hrhsi.new_tensor(0.0)
                 loss_ddl_items = make_zero_ddl_items(output_hrhsi)
 
-            # 等变一致性支持两种消融模式：
+            # 变换分支支持三种消融模式：
             # input_transform：实验058的输入等变约束；
             # physics_cycle：实验059参考EI，通过变换预测、双物理退化和再次重建形成闭环。
-            if equivariance_enable and lambda_equivariance > 0.0:
+            # transformed_observation：实验063删除HRHSI伪目标L1，改用固定双退化后的真实观测约束。
+            loss_transformed_obs_spatial = output_hrhsi.new_tensor(0.0)
+            loss_transformed_obs_spectral = output_hrhsi.new_tensor(0.0)
+            loss_transformed_observation = output_hrhsi.new_tensor(0.0)
+            transformed_observation_eff = output_hrhsi.new_tensor(0.0)
+            transform_branch_enabled = equivariance_enable and (
+                lambda_equivariance > 0.0
+                or equivariance_mode == "transformed_observation"
+            )
+            if transform_branch_enabled:
                 transform_id = int(torch.randint(
                     1, 8, (1,), generator=equivariance_generator
                 ).item())
@@ -642,7 +665,7 @@ if "__main__"==__name__:
                     loss_equivariance = F.l1_loss(
                         transformed_output_hrhsi, equivariance_target
                     )
-                else:
+                elif equivariance_mode == "physics_cycle":
                     # EI原始训练闭环：x2=T(x1)，x3=f(A(x2))，约束x3与x2一致。
                     # 不对x2执行detach，保留原始EI两侧共同反向传播的设计。
                     equivariance_target = apply_d4_transform(
@@ -660,9 +683,54 @@ if "__main__"==__name__:
                     loss_equivariance = F.l1_loss(
                         transformed_output_hrhsi, equivariance_target
                     )
+                else:
+                    transformed_lr_hsi = apply_d4_transform(lr_hsi, transform_id)
+                    transformed_hr_msi = apply_d4_transform(hr_msi, transform_id)
+                    transformed_output_hrhsi, _, _, _ = model(
+                        transformed_lr_hsi, transformed_hr_msi
+                    )
+                    if dual_loss is not None:
+                        transformed_output_hrhsi = dual_loss.refine_hrhsi(
+                            transformed_output_hrhsi
+                        )
+
+                    # 使用与主分支完全相同的固定退化算子和归一化L2形式。
+                    transformed_output_lrhsi = spatial_down(
+                        transformed_output_hrhsi
+                    )
+                    transformed_output_hrmsi = spectral_down(
+                        transformed_output_hrhsi
+                    )
+                    _, C_lr_t, H_lr_t, W_lr_t = transformed_lr_hsi.shape
+                    loss_transformed_obs_spatial = torch.sum(
+                        (transformed_output_lrhsi - transformed_lr_hsi) ** 2
+                    ) / (2 * W_lr_t * H_lr_t * C_lr_t)
+                    _, C_ms_t, H_ms_t, W_ms_t = transformed_hr_msi.shape
+                    loss_transformed_obs_spectral = torch.sum(
+                        (transformed_output_hrmsi - transformed_hr_msi) ** 2
+                    ) / (2 * W_ms_t * H_ms_t * C_ms_t)
+                    loss_transformed_observation = (
+                        loss_transformed_obs_spatial
+                        + loss_transformed_obs_spectral
+                    )
+                    loss_equivariance = output_hrhsi.new_tensor(0.0)
             else:
                 loss_equivariance = output_hrhsi.new_tensor(0.0)
             equivariance_eff = lambda_equivariance * loss_equivariance
+
+            # 063将原始和变换分支的真实观测一致性等权平均。
+            # 这是对原L1等变项的替换，不是额外叠加，因此不会把一致性总尺度翻倍。
+            if (
+                    transform_branch_enabled
+                    and equivariance_mode == "transformed_observation"
+            ):
+                loss_L2_augmented = 0.5 * (
+                    loss_L2 + loss_transformed_observation
+                )
+                loss_base = loss_edge + loss_L2_augmented
+                transformed_observation_eff = (
+                    0.5 * loss_transformed_observation
+                )
 
             # 061/062：直接在真实LRHSI观测域约束光谱曲线形状。
             # 061只约束主分支；062同时约束D4分支，并取均值保持总权重尺度一致。
@@ -708,6 +776,24 @@ if "__main__"==__name__:
             equivariance_loss_epoch_sum += loss_equivariance.detach().item()
             equivariance_eff_epoch_sum += equivariance_eff.detach().item()
             equivariance_ratio_epoch_sum += equivariance_ratio
+            transformed_observation_ratio = (
+                transformed_observation_eff.detach().item() / loss_denom
+            )
+            transformed_obs_spatial_epoch_sum += (
+                loss_transformed_obs_spatial.detach().item()
+            )
+            transformed_obs_spectral_epoch_sum += (
+                loss_transformed_obs_spectral.detach().item()
+            )
+            transformed_observation_epoch_sum += (
+                loss_transformed_observation.detach().item()
+            )
+            transformed_observation_eff_epoch_sum += (
+                transformed_observation_eff.detach().item()
+            )
+            transformed_observation_ratio_epoch_sum += (
+                transformed_observation_ratio
+            )
             spectral_shape_ratio = spectral_shape_eff.detach().item() / loss_denom
             spectral_shape_main_epoch_sum += loss_spectral_shape_main.detach().item()
             spectral_shape_d4_epoch_sum += loss_spectral_shape_d4.detach().item()
@@ -732,12 +818,22 @@ if "__main__"==__name__:
             loop.set_description(f"[第{epoch}轮/共{end_epoch}轮]")
             current_jac_active_ratio = jac_active_count / batch_count if batch_count > 0 else 0.0
             # 终端进度条只保留关键状态，完整诊断项仍写入 CSV。
+            transform_log_name = (
+                "obsT"
+                if equivariance_mode == "transformed_observation"
+                else "eq"
+            )
+            transform_log_value = (
+                transformed_observation_eff
+                if equivariance_mode == "transformed_observation"
+                else equivariance_eff
+            )
             loop.set_postfix({"loss":   f"{loss_value:.8f}",
                               "base":   f"{loss_base.item():.8f}",
                               "ddl":    f"{loss_ddl_items['ddl'].item():.8f}",
                               "cyc":    f"{loss_ddl_items['cycle_eff'].item():.8f}",
                               "jac":    f"{loss_ddl_items['jac_eff'].item():.8f}",
-                              "eq":     f"{equivariance_eff.item():.8f}",
+                              transform_log_name: f"{transform_log_value.item():.8f}",
                               "spe":    f"{spectral_shape_eff.item():.8f}",
                               "lr":     f"{lr_now:.8f}"})
         scheduler.step()
@@ -851,6 +947,21 @@ if "__main__"==__name__:
             mean_spectral_shape_loss = spectral_shape_loss_epoch_sum / jac_stat_count
             mean_spectral_shape_eff = spectral_shape_eff_epoch_sum / jac_stat_count
             mean_spectral_shape_ratio = spectral_shape_ratio_epoch_sum / jac_stat_count
+            mean_transformed_obs_spatial = (
+                transformed_obs_spatial_epoch_sum / jac_stat_count
+            )
+            mean_transformed_obs_spectral = (
+                transformed_obs_spectral_epoch_sum / jac_stat_count
+            )
+            mean_transformed_observation = (
+                transformed_observation_epoch_sum / jac_stat_count
+            )
+            mean_transformed_observation_eff = (
+                transformed_observation_eff_epoch_sum / jac_stat_count
+            )
+            mean_transformed_observation_ratio = (
+                transformed_observation_ratio_epoch_sum / jac_stat_count
+            )
             if legacy_cycle_only_log:
                 val_list = [epoch, optimizer.param_groups[0]["lr"], np.mean(loss_all), val_loss_meter.avg,
                             rmse_meter.avg, psnr_meter.avg, sam_meter.avg, ssim_meter.avg, ergas_meter.avg,
@@ -933,7 +1044,12 @@ if "__main__"==__name__:
                             mean_spectral_shape_d4,
                             mean_spectral_shape_loss,
                             mean_spectral_shape_eff,
-                            mean_spectral_shape_ratio]
+                            mean_spectral_shape_ratio,
+                            mean_transformed_obs_spatial,
+                            mean_transformed_obs_spectral,
+                            mean_transformed_observation,
+                            mean_transformed_observation_eff,
+                            mean_transformed_observation_ratio]
             val_data = pd.DataFrame([val_list])
 
             val_data.to_csv(excel_path, mode='a', header=False, index=False)
