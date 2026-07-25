@@ -280,6 +280,21 @@ if "__main__"==__name__:
     )
     if lambda_transformed_observation < 0.0:
         raise ValueError("lambda_transformed_observation must be non-negative.")
+    lambda_transformed_spectral_shape = float(
+        cfg["train"].get("lambda_transformed_spectral_shape", 0.0)
+    )
+    if lambda_transformed_spectral_shape < 0.0:
+        raise ValueError("lambda_transformed_spectral_shape must be non-negative.")
+    if (
+            lambda_transformed_spectral_shape > 0.0
+            and (
+                not equivariance_enable
+                or equivariance_mode != "transformed_observation"
+            )
+    ):
+        raise ValueError(
+            "lambda_transformed_spectral_shape requires transformed_observation mode."
+        )
     spectral_shape_loss_enable = bool(cfg["train"].get("spectral_shape_loss_enable", False))
     spectral_shape_loss_scope = cfg["train"].get("spectral_shape_loss_scope", "main")
     if spectral_shape_loss_scope not in {"main", "symmetric"}:
@@ -445,7 +460,11 @@ if "__main__"==__name__:
                                        "loss_transformed_obs_spectral",
                                        "loss_transformed_observation",
                                        "transformed_observation_eff",
-                                       "transformed_observation_ratio"])
+                                       "transformed_observation_ratio",
+                                       "lambda_transformed_spectral_shape",
+                                       "loss_transformed_spectral_shape",
+                                       "transformed_spectral_shape_eff",
+                                       "transformed_spectral_shape_ratio"])
         df.to_csv(excel_path, index=False)
     # ===========================================================================================
     # 1. 构造训练数据集和 DataLoader。
@@ -562,6 +581,9 @@ if "__main__"==__name__:
         transformed_observation_epoch_sum = 0.0
         transformed_observation_eff_epoch_sum = 0.0
         transformed_observation_ratio_epoch_sum = 0.0
+        transformed_spectral_shape_epoch_sum = 0.0
+        transformed_spectral_shape_eff_epoch_sum = 0.0
+        transformed_spectral_shape_ratio_epoch_sum = 0.0
         batch_count = 0
         loop = tqdm(train_loader, total=len(train_loader))
         start_time = time.time()
@@ -647,11 +669,16 @@ if "__main__"==__name__:
             loss_transformed_obs_spectral = output_hrhsi.new_tensor(0.0)
             loss_transformed_observation = output_hrhsi.new_tensor(0.0)
             transformed_observation_eff = output_hrhsi.new_tensor(0.0)
+            loss_transformed_spectral_shape = output_hrhsi.new_tensor(0.0)
+            transformed_spectral_shape_eff = output_hrhsi.new_tensor(0.0)
             transform_branch_enabled = equivariance_enable and (
                 lambda_equivariance > 0.0
                 or (
                     equivariance_mode == "transformed_observation"
-                    and lambda_transformed_observation > 0.0
+                    and (
+                        lambda_transformed_observation > 0.0
+                        or lambda_transformed_spectral_shape > 0.0
+                    )
                 )
             )
             if transform_branch_enabled:
@@ -722,6 +749,11 @@ if "__main__"==__name__:
                         loss_transformed_obs_spatial
                         + loss_transformed_obs_spectral
                     )
+                    if lambda_transformed_spectral_shape > 0.0:
+                        loss_transformed_spectral_shape = spectral_shape_consistency(
+                            transformed_output_lrhsi,
+                            transformed_lr_hsi,
+                        )
                     loss_equivariance = output_hrhsi.new_tensor(0.0)
             else:
                 loss_equivariance = output_hrhsi.new_tensor(0.0)
@@ -736,6 +768,10 @@ if "__main__"==__name__:
                 transformed_observation_eff = (
                     lambda_transformed_observation
                     * loss_transformed_observation
+                )
+                transformed_spectral_shape_eff = (
+                    lambda_transformed_spectral_shape
+                    * loss_transformed_spectral_shape
                 )
 
             # 061/062：直接在真实LRHSI观测域约束光谱曲线形状。
@@ -780,6 +816,7 @@ if "__main__"==__name__:
                 + equivariance_eff
                 + spectral_shape_eff
                 + transformed_observation_eff
+                + transformed_spectral_shape_eff
             )
             loss_denom = abs(loss.detach().item())
             if loss_denom < 1e-12:
@@ -805,6 +842,18 @@ if "__main__"==__name__:
             )
             transformed_observation_ratio_epoch_sum += (
                 transformed_observation_ratio
+            )
+            transformed_spectral_shape_ratio = (
+                transformed_spectral_shape_eff.detach().item() / loss_denom
+            )
+            transformed_spectral_shape_epoch_sum += (
+                loss_transformed_spectral_shape.detach().item()
+            )
+            transformed_spectral_shape_eff_epoch_sum += (
+                transformed_spectral_shape_eff.detach().item()
+            )
+            transformed_spectral_shape_ratio_epoch_sum += (
+                transformed_spectral_shape_ratio
             )
             spectral_shape_ratio = spectral_shape_eff.detach().item() / loss_denom
             spectral_shape_main_epoch_sum += loss_spectral_shape_main.detach().item()
@@ -974,6 +1023,15 @@ if "__main__"==__name__:
             mean_transformed_observation_ratio = (
                 transformed_observation_ratio_epoch_sum / jac_stat_count
             )
+            mean_transformed_spectral_shape = (
+                transformed_spectral_shape_epoch_sum / jac_stat_count
+            )
+            mean_transformed_spectral_shape_eff = (
+                transformed_spectral_shape_eff_epoch_sum / jac_stat_count
+            )
+            mean_transformed_spectral_shape_ratio = (
+                transformed_spectral_shape_ratio_epoch_sum / jac_stat_count
+            )
             if legacy_cycle_only_log:
                 val_list = [epoch, optimizer.param_groups[0]["lr"], np.mean(loss_all), val_loss_meter.avg,
                             rmse_meter.avg, psnr_meter.avg, sam_meter.avg, ssim_meter.avg, ergas_meter.avg,
@@ -1062,7 +1120,11 @@ if "__main__"==__name__:
                             mean_transformed_obs_spectral,
                             mean_transformed_observation,
                             mean_transformed_observation_eff,
-                            mean_transformed_observation_ratio]
+                            mean_transformed_observation_ratio,
+                            lambda_transformed_spectral_shape,
+                            mean_transformed_spectral_shape,
+                            mean_transformed_spectral_shape_eff,
+                            mean_transformed_spectral_shape_ratio]
             val_data = pd.DataFrame([val_list])
 
             val_data.to_csv(excel_path, mode='a', header=False, index=False)
