@@ -80,8 +80,8 @@ CAVE:
     # experiment_name: 059_seed42_ordp_physics_equivariant_cycle
     # 060：在058输入等变一致性上加入055的共享光谱形状可靠性。
     # experiment_name: 060_seed42_spectral_ob_rely_equivariant
-    # 063：基于058，删除HRHSI伪目标L1，改为D4输出经固定双退化后的真实观测一致性。
-    experiment_name: 063_seed42_transformed_dual_observation_consistency
+    # 064：修正063的损失尺度，完整保留主一致性，仅小权重加入D4双退化观测一致性。
+    experiment_name: 064_seed42_weighted_transformed_observation_consistency
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -119,8 +119,9 @@ CAVE:
     cycle_reliability_learnable_mix: false
     equivariance_enable: true
     equivariance_mode: transformed_observation
-    # 063不再使用HRHSI等变L1；变换观测一致性与主分支一致性直接取平均。
+    # 064不使用HRHSI伪目标L1；变换观测一致性仅作为0.001权重的辅助项。
     lambda_equivariance: 0.0
+    lambda_transformed_observation: 0.001
     spectral_shape_loss_enable: false
     spectral_shape_loss_scope: main
     lambda_spectral_shape: 0.0

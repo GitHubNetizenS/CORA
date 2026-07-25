@@ -275,6 +275,11 @@ if "__main__"==__name__:
             "可选值为input_transform、physics_cycle或transformed_observation。"
         )
     lambda_equivariance = float(cfg["train"].get("lambda_equivariance", 0.0))
+    lambda_transformed_observation = float(
+        cfg["train"].get("lambda_transformed_observation", 0.0)
+    )
+    if lambda_transformed_observation < 0.0:
+        raise ValueError("lambda_transformed_observation must be non-negative.")
     spectral_shape_loss_enable = bool(cfg["train"].get("spectral_shape_loss_enable", False))
     spectral_shape_loss_scope = cfg["train"].get("spectral_shape_loss_scope", "main")
     if spectral_shape_loss_scope not in {"main", "symmetric"}:
@@ -435,6 +440,7 @@ if "__main__"==__name__:
                                        "lambda_spectral_shape", "loss_spectral_shape_main",
                                        "loss_spectral_shape_d4", "loss_spectral_shape",
                                        "spectral_shape_eff", "spectral_shape_ratio",
+                                       "lambda_transformed_observation",
                                        "loss_transformed_obs_spatial",
                                        "loss_transformed_obs_spectral",
                                        "loss_transformed_observation",
@@ -643,7 +649,10 @@ if "__main__"==__name__:
             transformed_observation_eff = output_hrhsi.new_tensor(0.0)
             transform_branch_enabled = equivariance_enable and (
                 lambda_equivariance > 0.0
-                or equivariance_mode == "transformed_observation"
+                or (
+                    equivariance_mode == "transformed_observation"
+                    and lambda_transformed_observation > 0.0
+                )
             )
             if transform_branch_enabled:
                 transform_id = int(torch.randint(
@@ -718,18 +727,15 @@ if "__main__"==__name__:
                 loss_equivariance = output_hrhsi.new_tensor(0.0)
             equivariance_eff = lambda_equivariance * loss_equivariance
 
-            # 063将原始和变换分支的真实观测一致性等权平均。
-            # 这是对原L1等变项的替换，不是额外叠加，因此不会把一致性总尺度翻倍。
+            # 实验064完整保留主观测一致性，变换观测一致性仅作为小权重辅助项。
+            # 避免原始063的0.5等权平均削弱主任务并让变换分支主导训练。
             if (
                     transform_branch_enabled
                     and equivariance_mode == "transformed_observation"
             ):
-                loss_L2_augmented = 0.5 * (
-                    loss_L2 + loss_transformed_observation
-                )
-                loss_base = loss_edge + loss_L2_augmented
                 transformed_observation_eff = (
-                    0.5 * loss_transformed_observation
+                    lambda_transformed_observation
+                    * loss_transformed_observation
                 )
 
             # 061/062：直接在真实LRHSI观测域约束光谱曲线形状。
@@ -768,7 +774,13 @@ if "__main__"==__name__:
             jac_eff_epoch_sum += loss_ddl_items["jac_eff"].item()
             # 历史尝试包括固定 lambda_ddl、全局可学习 base/DDL 权重和单个可学习 DDL 权重。
             # 当前版本统一在 DualLearningLoss 内部用固定权重组合 DDL 子项。
-            loss = loss_base + loss_ddl + equivariance_eff + spectral_shape_eff
+            loss = (
+                loss_base
+                + loss_ddl
+                + equivariance_eff
+                + spectral_shape_eff
+                + transformed_observation_eff
+            )
             loss_denom = abs(loss.detach().item())
             if loss_denom < 1e-12:
                 loss_denom = 1e-12
@@ -1045,6 +1057,7 @@ if "__main__"==__name__:
                             mean_spectral_shape_loss,
                             mean_spectral_shape_eff,
                             mean_spectral_shape_ratio,
+                            lambda_transformed_observation,
                             mean_transformed_obs_spatial,
                             mean_transformed_obs_spectral,
                             mean_transformed_observation,
