@@ -275,6 +275,23 @@ if "__main__"==__name__:
             "可选值为input_transform、physics_cycle或transformed_observation。"
         )
     lambda_equivariance = float(cfg["train"].get("lambda_equivariance", 0.0))
+    lambda_transformed_msi_observation = float(
+        cfg["train"].get("lambda_transformed_msi_observation", 0.0)
+    )
+    if lambda_transformed_msi_observation < 0.0:
+        raise ValueError(
+            "lambda_transformed_msi_observation must be non-negative."
+        )
+    if (
+            lambda_transformed_msi_observation > 0.0
+            and (
+                not equivariance_enable
+                or equivariance_mode != "input_transform"
+            )
+    ):
+        raise ValueError(
+            "lambda_transformed_msi_observation requires input_transform mode."
+        )
     lambda_transformed_observation = float(
         cfg["train"].get("lambda_transformed_observation", 0.0)
     )
@@ -452,6 +469,10 @@ if "__main__"==__name__:
                                        "bp_spatial_delta_mean", "bp_spectral_delta_mean",
                                        "lambda_equivariance", "loss_equivariance",
                                        "equivariance_eff", "equivariance_ratio",
+                                       "lambda_transformed_msi_observation",
+                                       "loss_transformed_msi_observation",
+                                       "transformed_msi_observation_eff",
+                                       "transformed_msi_observation_ratio",
                                        "lambda_spectral_shape", "loss_spectral_shape_main",
                                        "loss_spectral_shape_d4", "loss_spectral_shape",
                                        "spectral_shape_eff", "spectral_shape_ratio",
@@ -571,6 +592,9 @@ if "__main__"==__name__:
         equivariance_loss_epoch_sum = 0.0
         equivariance_eff_epoch_sum = 0.0
         equivariance_ratio_epoch_sum = 0.0
+        transformed_msi_observation_epoch_sum = 0.0
+        transformed_msi_observation_eff_epoch_sum = 0.0
+        transformed_msi_observation_ratio_epoch_sum = 0.0
         spectral_shape_main_epoch_sum = 0.0
         spectral_shape_d4_epoch_sum = 0.0
         spectral_shape_loss_epoch_sum = 0.0
@@ -671,8 +695,14 @@ if "__main__"==__name__:
             transformed_observation_eff = output_hrhsi.new_tensor(0.0)
             loss_transformed_spectral_shape = output_hrhsi.new_tensor(0.0)
             transformed_spectral_shape_eff = output_hrhsi.new_tensor(0.0)
+            loss_transformed_msi_observation = output_hrhsi.new_tensor(0.0)
+            transformed_msi_observation_eff = output_hrhsi.new_tensor(0.0)
             transform_branch_enabled = equivariance_enable and (
                 lambda_equivariance > 0.0
+                or (
+                    equivariance_mode == "input_transform"
+                    and lambda_transformed_msi_observation > 0.0
+                )
                 or (
                     equivariance_mode == "transformed_observation"
                     and (
@@ -701,6 +731,17 @@ if "__main__"==__name__:
                     loss_equivariance = F.l1_loss(
                         transformed_output_hrhsi, equivariance_target
                     )
+                    if lambda_transformed_msi_observation > 0.0:
+                        transformed_output_hrmsi = spectral_down(
+                            transformed_output_hrhsi
+                        )
+                        _, C_ms_t, H_ms_t, W_ms_t = transformed_hr_msi.shape
+                        loss_transformed_msi_observation = torch.sum(
+                            (
+                                transformed_output_hrmsi
+                                - transformed_hr_msi
+                            ) ** 2
+                        ) / (2 * W_ms_t * H_ms_t * C_ms_t)
                 elif equivariance_mode == "physics_cycle":
                     # EI原始训练闭环：x2=T(x1)，x3=f(A(x2))，约束x3与x2一致。
                     # 不对x2执行detach，保留原始EI两侧共同反向传播的设计。
@@ -758,6 +799,10 @@ if "__main__"==__name__:
             else:
                 loss_equivariance = output_hrhsi.new_tensor(0.0)
             equivariance_eff = lambda_equivariance * loss_equivariance
+            transformed_msi_observation_eff = (
+                lambda_transformed_msi_observation
+                * loss_transformed_msi_observation
+            )
 
             # 实验064完整保留主观测一致性，变换观测一致性仅作为小权重辅助项。
             # 避免原始063的0.5等权平均削弱主任务并让变换分支主导训练。
@@ -814,6 +859,7 @@ if "__main__"==__name__:
                 loss_base
                 + loss_ddl
                 + equivariance_eff
+                + transformed_msi_observation_eff
                 + spectral_shape_eff
                 + transformed_observation_eff
                 + transformed_spectral_shape_eff
@@ -825,6 +871,18 @@ if "__main__"==__name__:
             equivariance_loss_epoch_sum += loss_equivariance.detach().item()
             equivariance_eff_epoch_sum += equivariance_eff.detach().item()
             equivariance_ratio_epoch_sum += equivariance_ratio
+            transformed_msi_observation_ratio = (
+                transformed_msi_observation_eff.detach().item() / loss_denom
+            )
+            transformed_msi_observation_epoch_sum += (
+                loss_transformed_msi_observation.detach().item()
+            )
+            transformed_msi_observation_eff_epoch_sum += (
+                transformed_msi_observation_eff.detach().item()
+            )
+            transformed_msi_observation_ratio_epoch_sum += (
+                transformed_msi_observation_ratio
+            )
             transformed_observation_ratio = (
                 transformed_observation_eff.detach().item() / loss_denom
             )
@@ -895,6 +953,7 @@ if "__main__"==__name__:
                               "cyc":    f"{loss_ddl_items['cycle_eff'].item():.8f}",
                               "jac":    f"{loss_ddl_items['jac_eff'].item():.8f}",
                               transform_log_name: f"{transform_log_value.item():.8f}",
+                              "msiT":   f"{transformed_msi_observation_eff.item():.8f}",
                               "spe":    f"{spectral_shape_eff.item():.8f}",
                               "lr":     f"{lr_now:.8f}"})
         scheduler.step()
@@ -1003,6 +1062,15 @@ if "__main__"==__name__:
             mean_equivariance_loss = equivariance_loss_epoch_sum / jac_stat_count
             mean_equivariance_eff = equivariance_eff_epoch_sum / jac_stat_count
             mean_equivariance_ratio = equivariance_ratio_epoch_sum / jac_stat_count
+            mean_transformed_msi_observation = (
+                transformed_msi_observation_epoch_sum / jac_stat_count
+            )
+            mean_transformed_msi_observation_eff = (
+                transformed_msi_observation_eff_epoch_sum / jac_stat_count
+            )
+            mean_transformed_msi_observation_ratio = (
+                transformed_msi_observation_ratio_epoch_sum / jac_stat_count
+            )
             mean_spectral_shape_main = spectral_shape_main_epoch_sum / jac_stat_count
             mean_spectral_shape_d4 = spectral_shape_d4_epoch_sum / jac_stat_count
             mean_spectral_shape_loss = spectral_shape_loss_epoch_sum / jac_stat_count
@@ -1109,6 +1177,10 @@ if "__main__"==__name__:
                             mean_equivariance_loss,
                             mean_equivariance_eff,
                             mean_equivariance_ratio,
+                            lambda_transformed_msi_observation,
+                            mean_transformed_msi_observation,
+                            mean_transformed_msi_observation_eff,
+                            mean_transformed_msi_observation_ratio,
                             lambda_spectral_shape,
                             mean_spectral_shape_main,
                             mean_spectral_shape_d4,

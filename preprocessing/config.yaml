@@ -80,9 +80,9 @@ CAVE:
     # experiment_name: 059_seed42_ordp_physics_equivariant_cycle
     # 060：在058输入等变一致性上加入055的共享光谱形状可靠性。
     # experiment_name: 060_seed42_spectral_ob_rely_equivariant
-    # 066：从零复现实验061，不使用SWA或checkpoint平均。
-    # 保留输入D4等变一致性，并仅在主分支真实LRHSI观测域施加光谱形状约束。
-    experiment_name: 066_seed42_reproduce_061_no_swa
+    # 067：基于061，在D4分支增加真实HRMSI观测域的归一化MSE。
+    # 该辅助项只约束变换分支，不改变ORDP、主分支光谱形状约束或模型结构。
+    experiment_name: 067_seed42_061_transformed_msi_observation
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -121,6 +121,7 @@ CAVE:
     equivariance_enable: true
     equivariance_mode: input_transform
     lambda_equivariance: 0.001
+    lambda_transformed_msi_observation: 0.001
     lambda_transformed_observation: 0.0
     lambda_transformed_spectral_shape: 0.0
     spectral_shape_loss_enable: true
