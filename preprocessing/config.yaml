@@ -153,6 +153,7 @@ Harvard:
     mat_key: ref
     num: 30
     train_stride: 64
+    end_epoch: 400
     experiment_name: 069_seed42_harvard_final_061_logic_no_swa
   test:
     <<: *cave_test
