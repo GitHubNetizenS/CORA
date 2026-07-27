@@ -14,7 +14,6 @@ import seaborn              as sns
 import torch.utils.data     as data
 import matplotlib.pyplot    as plt
 from tqdm                       import tqdm
-from scipy.io                   import loadmat
 from preprocessing_dataloader   import *
 from preprocessing_utils        import BlurDownsample, DualLearningLoss
 from models.AMSF                import *
@@ -232,8 +231,13 @@ def apply_cycle_schedule(dual_loss, epoch, end_epoch, base_cycle_weights, schedu
 
 
 if "__main__"==__name__:
-    parser = argparse.ArgumentParser(description="Train AMSF-Net CAVE experiments.")
+    parser = argparse.ArgumentParser(description="Train AMSF-Net HSI-MSI fusion experiments.")
     parser.add_argument("--config", default="config.yaml", help="Path to the experiment config YAML.")
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help="Dataset configuration section. Defaults to active_dataset in the YAML file.",
+    )
     args = parser.parse_args()
     config_file = args.config
 
@@ -241,7 +245,17 @@ if "__main__"==__name__:
     # 读取 CAVE 数据集配置，并以配置中的 seed 作为最终随机种子。
     set_seed(42)
     with open(config_file, 'r', encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)["CAVE"]
+        config_data = yaml.safe_load(f)
+    dataset_name = str(args.dataset or config_data.get("active_dataset", "CAVE"))
+    if dataset_name not in config_data:
+        available_datasets = [
+            key for key, value in config_data.items()
+            if isinstance(value, dict) and "train" in value and "test" in value
+        ]
+        raise KeyError(
+            f"配置中不存在数据集 {dataset_name!r}，可用数据集为 {available_datasets}。"
+        )
+    cfg = config_data[dataset_name]
     seed = int(cfg["train"].get("seed", 42))
     set_seed(seed)
 
@@ -375,7 +389,11 @@ if "__main__"==__name__:
         cycle_experiment_name = "i1_edge_only_seed42"
 
     # 3. 路径设置。服务器默认目录见“目录调整.md”，也可用环境变量覆盖。
-    dataset_root = cfg["train"].get("dataset_root", "/root/autodl-tmp/datasets/lrtn/CAVE")
+    dataset_root = cfg["train"].get(
+        "dataset_root",
+        f"/root/autodl-tmp/datasets/lrtn/{dataset_name}",
+    )
+    mat_key = str(cfg["train"].get("mat_key", "hsi"))
     run_root = os.environ.get("AMSF_RUN_ROOT", cfg["train"].get("run_root", "/root/autodl-tmp/runs/AMSF-Net"))
     run_path = os.path.join(run_root, cycle_experiment_name)
     save_train_path = os.path.join(run_path, "checkpoints", "train")
@@ -388,7 +406,13 @@ if "__main__"==__name__:
     train_path = os.environ.get("AMSF_TRAIN_PATH", os.path.join(dataset_root, "Train"))
     test_path = os.environ.get("AMSF_TEST_PATH", os.path.join(dataset_root, "Test"))
     # 4. 读取验证集文件列表，并打印当前实验路径。
-    test_filename_list = get_filename_list(test_path)
+    test_filename_list = sorted(
+        filename for filename in get_filename_list(test_path)
+        if filename.lower().endswith(".mat")
+    )
+    if not test_filename_list:
+        raise RuntimeError(f"测试目录 {test_path} 中没有找到 .mat 文件。")
+    print(f"数据集: {dataset_name}，MAT键名: {mat_key}")
     print(f"训练数据路径: {train_path}")
     print(f"测试数据路径: {test_path}")
     print(f"实验输出路径: {run_path}")
@@ -426,8 +450,7 @@ if "__main__"==__name__:
     if not os.path.exists(config_snapshot):
         shutil.copy2(config_file, config_snapshot)
 
-    excel_name = f"{cycle_experiment_name}_cave_record.csv"
-    # excel_name = "harvard_record.csv"
+    excel_name = f"{cycle_experiment_name}_{dataset_name.lower()}_record.csv"
     excel_path = os.path.join(record_path, excel_name)
 
     if not os.path.exists(excel_path):
@@ -489,7 +512,16 @@ if "__main__"==__name__:
         df.to_csv(excel_path, index=False)
     # ===========================================================================================
     # 1. 构造训练数据集和 DataLoader。
-    train_dataset = HSIDataProcess(train_path, R, training_size, train_stride, downsample_factor, PSF, num)
+    train_dataset = HSIDataProcess(
+        train_path,
+        R,
+        training_size,
+        train_stride,
+        downsample_factor,
+        PSF,
+        num,
+        mat_key=mat_key,
+    )
     train_loader = data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     max_iteration = math.ceil(len(train_dataset)/batch_size) * end_epoch
 
@@ -1005,10 +1037,13 @@ if "__main__"==__name__:
             with torch.no_grad():
                 for i, filename in enumerate(test_filename_list):
                     file_path = os.path.join(test_path, filename)
-                    img = loadmat(file_path)
                     # CAVE 数据归一化到 [0, 1]。
-                    img1 = img["hsi"] / img["hsi"].max()
-                    # img1 = img["ref"] / img["ref"].max()
+                    img1 = load_hsi_mat(file_path, mat_key)
+                    if img1.shape[-1] != R.shape[1]:
+                        raise ValueError(
+                            f"{file_path} 的波段数为 {img1.shape[-1]}，"
+                            f"但光谱响应矩阵要求 {R.shape[1]} 个波段。"
+                        )
                     HRHSI_np = np.transpose(img1, (2, 0, 1)).astype(np.float32)
                     HRHSI = torch.Tensor(HRHSI_np)
                     # 构造 GT HRHSI，并使用 LRTN 的验证退化方式生成 LRHSI 和 HRMSI。

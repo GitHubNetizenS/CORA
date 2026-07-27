@@ -3,9 +3,36 @@ preprocessing_dataloader.py文件
 　　该Python文件定义了多个数据集类，用于加载不同来源的高光谱图像数据，并通过光谱响应矩阵和Gauss模糊下采样生成低分辨率高光谱图像与高分辨率多光谱图像，
 最后以滑动窗口方式裁剪成固定大小的训练样本对。
 """
+import os
+import numpy as np
 import scipy.io as sio
+import torch
 from torch.utils.data       import Dataset
 from preprocessing_utils    import *
+
+
+def load_hsi_mat(file_path, mat_key):
+    """读取并归一化一个 HWC 格式的高光谱图像。"""
+    mat_data = sio.loadmat(file_path)
+    if mat_key not in mat_data:
+        available_keys = sorted(key for key in mat_data if not key.startswith("__"))
+        raise KeyError(
+            f"{file_path} 中不存在数据键 {mat_key!r}，可用键为 {available_keys}。"
+        )
+
+    image = np.asarray(mat_data[mat_key])
+    if image.ndim != 3:
+        raise ValueError(
+            f"{file_path} 中 {mat_key!r} 的形状为 {image.shape}，期望 H×W×C 三维数组。"
+        )
+
+    image_max = float(np.max(image))
+    if not np.isfinite(image_max) or image_max <= 0.0:
+        raise ValueError(
+            f"{file_path} 中 {mat_key!r} 的最大值为 {image_max}，无法归一化。"
+        )
+
+    return image / image_max
 
 
 """
@@ -26,21 +53,31 @@ class HSIDataProcess(Dataset):
     PSF                 点扩散函数（Gauss模糊核，用于从HRHSI下采样到LRHSI。）
     num                 要读取的场景数量（如CAVE共32个场景，通常取前20或全部）
     """
-    def __init__(self, path, R, training_size, stride, downsample_factor, PSF, num):
-        imglist = os.listdir(path)
+    def __init__(self, path, R, training_size, stride, downsample_factor, PSF, num, mat_key="hsi"):
+        imglist = sorted(
+            filename for filename in os.listdir(path)
+            if filename.lower().endswith(".mat")
+        )
+        if num > len(imglist):
+            raise ValueError(
+                f"训练目录 {path} 仅包含 {len(imglist)} 个 .mat 文件，但配置要求读取 {num} 个。"
+            )
+
         train_hrhs = []
         train_hrms = []
         train_lrhs = []
 
         for i in range(0, num, 1):
             data_path = os.path.join(path, imglist[i])
-            img = sio.loadmat(data_path)
             # 读取标签为“b”的图像，也即高分辨率高光谱图像（HRHSI），并对其值归一化为[0, 1]。
             # Havard数据集的标签为“ref”，ICVL数据集的标签为“HSI”，某些CAVE数据集的标签为“b”或“hsi”。
             # 此处采用CAVE数据集，标签为“hsi”。
-            img1 = img["hsi"]
-            # img1 = img["ref"]
-            img1 = img1 / img1.max()
+            img1 = load_hsi_mat(data_path, mat_key)
+            if img1.shape[-1] != R.shape[1]:
+                raise ValueError(
+                    f"{data_path} 的波段数为 {img1.shape[-1]}，"
+                    f"但光谱响应矩阵要求 {R.shape[1]} 个波段。"
+                )
             # HRHSI尺寸为（C, H, W），HSI_LR尺寸为（C, h, w），MSI_HR尺寸为（c, H, W）。
             # 以CAVE数据集为例，HRHSI(31, 512, 512)，MSI_HR(3, 512, 512)，HSI_LR(31, 64, 64)。
             HRHSI = np.transpose(img1, (2, 0, 1))

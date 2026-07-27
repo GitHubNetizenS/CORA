@@ -1,7 +1,9 @@
 # config.yaml文件
 # 该文件用于定义数据集训练和测试的相关参数。
+active_dataset: Harvard
+
 CAVE:
-  train:
+  train: &cave_train
     downsample_factor: 8
     training_size: 64
     train_stride: 32
@@ -18,6 +20,7 @@ CAVE:
     epoch_gap: 50
     val_interval: 50
     dataset_root: /root/autodl-tmp/datasets/lrtn/CAVE
+    mat_key: hsi
     run_root: /root/autodl-tmp/runs/AMSF-Net
     # 拆分 cycle 实验：保留两个拉回分支，但分别设置权重。
     # 旧版单一 cycle 权重写法：
@@ -80,9 +83,9 @@ CAVE:
     # experiment_name: 059_seed42_ordp_physics_equivariant_cycle
     # 060：在058输入等变一致性上加入055的共享光谱形状可靠性。
     # experiment_name: 060_seed42_spectral_ob_rely_equivariant
-    # 067：基于061，在D4分支增加真实HRMSI观测域的归一化MSE。
-    # 该辅助项只约束变换分支，不改变ORDP、主分支光谱形状约束或模型结构。
-    experiment_name: 067_seed42_061_transformed_msi_observation
+    # 068：恢复实验061的完整训练逻辑，不使用SWA或067新增的变换后HRMSI观测损失。
+    # 使用独立目录，避免续训或覆盖已经完成的061、066和067实验。
+    experiment_name: 068_seed42_final_061_logic_no_swa
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
@@ -121,7 +124,7 @@ CAVE:
     equivariance_enable: true
     equivariance_mode: input_transform
     lambda_equivariance: 0.001
-    lambda_transformed_msi_observation: 0.001
+    lambda_transformed_msi_observation: 0.0
     lambda_transformed_observation: 0.0
     lambda_transformed_spectral_shape: 0.0
     spectral_shape_loss_enable: true
@@ -136,9 +139,23 @@ CAVE:
     observation_backprojection_detach: true
     beta_spatial_bp: 0.0
     beta_spectral_bp: 0.0
-  test:
+  test: &cave_test
     test_epoch: 50
     test_stride: 32
 #    test_stride: 64
     psnr_optimal: 42
     rmse_optimal: 1.5
+
+Harvard:
+  train:
+    <<: *cave_train
+    dataset_root: /root/autodl-tmp/datasets/lrtn/Harvard
+    mat_key: ref
+    num: 30
+    train_stride: 64
+    experiment_name: 069_seed42_harvard_final_061_logic_no_swa
+  test:
+    <<: *cave_test
+    test_stride: 64
+    psnr_optimal: 0.0
+    rmse_optimal: 1000000.0
