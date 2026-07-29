@@ -11,25 +11,94 @@ from torch.utils.data       import Dataset
 from preprocessing_utils    import *
 
 
-def load_hsi_mat(file_path, mat_key):
-    """读取并归一化一个 HWC 格式的高光谱图像。"""
-    mat_data = sio.loadmat(file_path)
-    if mat_key not in mat_data:
-        available_keys = sorted(key for key in mat_data if not key.startswith("__"))
-        raise KeyError(
-            f"{file_path} 中不存在数据键 {mat_key!r}，可用键为 {available_keys}。"
-        )
+SUPPORTED_HSI_EXTENSIONS = (".mat", ".h5", ".hdf5")
 
-    image = np.asarray(mat_data[mat_key])
+
+def is_hsi_file(filename):
+    """判断文件是否为当前 dataloader 支持的高光谱数据文件。"""
+    return str(filename).lower().endswith(SUPPORTED_HSI_EXTENSIONS)
+
+
+def _load_mat_arrays(file_path):
+    """兼容普通 MAT 文件和基于 HDF5 的 MATLAB v7.3 文件。"""
+    try:
+        mat_data = sio.loadmat(file_path)
+        return {
+            key: np.asarray(value)
+            for key, value in mat_data.items()
+            if not key.startswith("__")
+        }
+    except (NotImplementedError, ValueError, OSError):
+        import h5py
+
+        with h5py.File(file_path, "r") as h5_file:
+            return {
+                key: np.asarray(h5_file[key])
+                for key in h5_file.keys()
+                if hasattr(h5_file[key], "shape")
+            }
+
+
+def load_hsi_mat(file_path, mat_key, expected_bands=None):
+    """读取高光谱图像、转换为 HWC，并按场景最大值归一化。"""
+    mat_data = _load_mat_arrays(file_path)
+    available_keys = sorted(mat_data)
+
+    if str(mat_key).lower() == "auto":
+        preferred_keys = ("GT", "gt", "HSI", "hsi", "ref", "data", "pavia")
+        selected_key = None
+        for key in preferred_keys:
+            if key not in mat_data:
+                continue
+            candidate = np.squeeze(np.asarray(mat_data[key]))
+            if candidate.ndim != 3:
+                continue
+            if expected_bands is None or expected_bands in candidate.shape:
+                selected_key = key
+                break
+        if selected_key is None:
+            for key in available_keys:
+                candidate = np.squeeze(np.asarray(mat_data[key]))
+                if candidate.ndim == 3 and (
+                        expected_bands is None or expected_bands in candidate.shape
+                ):
+                    selected_key = key
+                    break
+        if selected_key is None:
+            raise KeyError(
+                f"{file_path} 中没有找到符合 {expected_bands} 波段要求的三维高光谱数据，"
+                f"可用键为 {available_keys}。"
+            )
+    else:
+        selected_key = mat_key
+        if selected_key not in mat_data:
+            raise KeyError(
+                f"{file_path} 中不存在数据键 {selected_key!r}，可用键为 {available_keys}。"
+            )
+
+    image = np.squeeze(np.asarray(mat_data[selected_key]))
     if image.ndim != 3:
         raise ValueError(
-            f"{file_path} 中 {mat_key!r} 的形状为 {image.shape}，期望 H×W×C 三维数组。"
+            f"{file_path} 中 {selected_key!r} 的形状为 {image.shape}，期望三维数组。"
         )
 
+    if expected_bands is not None:
+        band_axes = [
+            axis for axis, size in enumerate(image.shape)
+            if size == int(expected_bands)
+        ]
+        if len(band_axes) != 1:
+            raise ValueError(
+                f"{file_path} 中 {selected_key!r} 的形状为 {image.shape}，"
+                f"无法唯一确定 {expected_bands} 波段所在维度。"
+            )
+        image = np.moveaxis(image, band_axes[0], -1)
+
+    image = image.astype(np.float32, copy=False)
     image_max = float(np.max(image))
     if not np.isfinite(image_max) or image_max <= 0.0:
         raise ValueError(
-            f"{file_path} 中 {mat_key!r} 的最大值为 {image_max}，无法归一化。"
+            f"{file_path} 中 {selected_key!r} 的最大值为 {image_max}，无法归一化。"
         )
 
     return image / image_max
@@ -56,7 +125,7 @@ class HSIDataProcess(Dataset):
     def __init__(self, path, R, training_size, stride, downsample_factor, PSF, num, mat_key="hsi"):
         imglist = sorted(
             filename for filename in os.listdir(path)
-            if filename.lower().endswith(".mat")
+            if is_hsi_file(filename)
         )
         if num > len(imglist):
             raise ValueError(
@@ -72,7 +141,7 @@ class HSIDataProcess(Dataset):
             # 读取标签为“b”的图像，也即高分辨率高光谱图像（HRHSI），并对其值归一化为[0, 1]。
             # Havard数据集的标签为“ref”，ICVL数据集的标签为“HSI”，某些CAVE数据集的标签为“b”或“hsi”。
             # 此处采用CAVE数据集，标签为“hsi”。
-            img1 = load_hsi_mat(data_path, mat_key)
+            img1 = load_hsi_mat(data_path, mat_key, expected_bands=R.shape[1])
             if img1.shape[-1] != R.shape[1]:
                 raise ValueError(
                     f"{data_path} 的波段数为 {img1.shape[-1]}，"

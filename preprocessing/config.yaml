@@ -1,9 +1,14 @@
 # config.yaml文件
 # 该文件用于定义数据集训练和测试的相关参数。
-active_dataset: Harvard
+active_dataset: Pavia
 
 CAVE:
   train: &cave_train
+    n_bands: 31
+    n_select_bands: 3
+    spectral_response: cave
+    psf_kernel_size: 8
+    psf_sigma: 3.0
     downsample_factor: 8
     training_size: 64
     train_stride: 32
@@ -158,5 +163,27 @@ Harvard:
   test:
     <<: *cave_test
     test_stride: 64
+    psnr_optimal: 0.0
+    rmse_optimal: 1000000.0
+
+Pavia:
+  train:
+    <<: *cave_train
+    dataset_root: /root/autodl-tmp/datasets/lrtn/Pavia
+    mat_key: data
+    n_bands: 102
+    n_select_bands: 1
+    spectral_response: uniform
+    downsample_factor: 4
+    training_size: 64
+    train_stride: 32
+    num: 9
+    # 课题组 Pavia 训练框架采用 2000 epoch；每个 192x192 场景产生的
+    # 训练 patch 数明显少于 CAVE，因此这里保留该训练轮数。
+    end_epoch: 2000
+    experiment_name: 070_seed42_pavia_final_061_logic_no_swa
+  test:
+    <<: *cave_test
+    test_stride: 32
     psnr_optimal: 0.0
     rmse_optimal: 1000000.0

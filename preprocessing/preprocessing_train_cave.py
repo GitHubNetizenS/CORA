@@ -408,10 +408,10 @@ if "__main__"==__name__:
     # 4. 读取验证集文件列表，并打印当前实验路径。
     test_filename_list = sorted(
         filename for filename in get_filename_list(test_path)
-        if filename.lower().endswith(".mat")
+        if is_hsi_file(filename)
     )
     if not test_filename_list:
-        raise RuntimeError(f"测试目录 {test_path} 中没有找到 .mat 文件。")
+        raise RuntimeError(f"测试目录 {test_path} 中没有找到支持的高光谱数据文件。")
     print(f"数据集: {dataset_name}，MAT键名: {mat_key}")
     print(f"训练数据路径: {train_path}")
     print(f"测试数据路径: {test_path}")
@@ -419,10 +419,19 @@ if "__main__"==__name__:
     # 5. 初始化退化矩阵和训练参数。
     # 如果需要直接使用 PyTorch 的均方误差损失，可启用下面这一行。
     # loss_func = nn.MSELoss(reduction="mean").cuda()
-    # 构造 CAVE 的光谱响应矩阵和 LRTN 使用的 Gaussian PSF。
-    R = create_F()
-    PSF = fspecial("gaussian", 8, 3)
-    downsample_factor = cfg["train"]["downsample_factor"]   # 空间下采样倍率，CAVE 默认为 8。
+    # 按数据集配置构造固定光谱响应矩阵和 Gaussian PSF。
+    n_bands =            int(cfg["train"].get("n_bands", 31))
+    n_select_bands =     int(cfg["train"].get("n_select_bands", 3))
+    spectral_response =  str(cfg["train"].get("spectral_response", "cave"))
+    psf_kernel_size =    int(cfg["train"].get("psf_kernel_size", 8))
+    psf_sigma =          float(cfg["train"].get("psf_sigma", 3.0))
+    R = create_F(
+        n_bands=n_bands,
+        n_select_bands=n_select_bands,
+        response_type=spectral_response,
+    )
+    PSF = fspecial("gaussian", psf_kernel_size, psf_sigma)
+    downsample_factor = cfg["train"]["downsample_factor"]   # 空间下采样倍率。
     training_size =     cfg["train"]["training_size"]       # 训练 patch 尺寸。
     train_stride =      cfg["train"]["train_stride"]        # 训练滑窗步长。
     lr =                cfg["train"]["lr"]                  # 初始学习率。
@@ -436,6 +445,11 @@ if "__main__"==__name__:
     test_stride =       cfg["test"]["test_stride"]          # 验证滑窗步长。
     psnr_optimal =      cfg["test"]["psnr_optimal"]         # PSNR 最优模型保存阈值。
     rmse_optimal =      cfg["test"]["rmse_optimal"]         # RMSE 最优模型保存阈值。
+    print(
+        f"观测配置: HSI={n_bands}波段，HR观测={n_select_bands}波段，"
+        f"空间倍率={downsample_factor}，SRF={spectral_response}，"
+        f"PSF={psf_kernel_size}x{psf_kernel_size}, sigma={psf_sigma:g}"
+    )
     # ===========================================================================================
     # 1. 创建输出目录。
     mkdir(record_path)
@@ -528,7 +542,7 @@ if "__main__"==__name__:
     print("总迭代次数为{}。".format(max_iteration))
     # ===========================================================================================
     # 1. 初始化 AMSF 主模型。
-    model = AMSF(n_select_bands=3, n_bands=31).cuda()
+    model = AMSF(n_select_bands=n_select_bands, n_bands=n_bands).cuda()
     # 2. 初始化卷积层、线性层和 LayerNorm 参数。
     for m in model.modules():
         if isinstance(m, (nn.Conv2d, nn.Linear)):
@@ -596,7 +610,10 @@ if "__main__"==__name__:
         start_epoch = 0
     # 2. 初始化训练阶段使用的空间退化、blur 退化和光谱退化算子。
     spatial_down = SpatialDownsample(PSF, downsample_factor).cuda()
-    blur_down = BlurDownsample(scale_factor=downsample_factor, channels=31).cuda()
+    blur_down = BlurDownsample(
+        scale_factor=downsample_factor,
+        channels=n_bands,
+    ).cuda()
     spectral_down = SpectralDownsample(R).cuda()
 
     # 旧版特征诊断代码曾用于查看 SHFE、MACS、TV 和通道相关性。
@@ -1027,7 +1044,7 @@ if "__main__"==__name__:
             RMSE = Loss_RMSE().cuda()
             PSNR = Loss_PSNR().cuda()
             SSIM = Loss_SSIM().cuda()
-            ERGAS = Loss_ERGAS().cuda()
+            ERGAS = Loss_ERGAS(scale=downsample_factor).cuda()
             sam_meter = AverageMeter()
             rmse_meter = AverageMeter()
             psnr_meter = AverageMeter()
@@ -1037,8 +1054,12 @@ if "__main__"==__name__:
             with torch.no_grad():
                 for i, filename in enumerate(test_filename_list):
                     file_path = os.path.join(test_path, filename)
-                    # CAVE 数据归一化到 [0, 1]。
-                    img1 = load_hsi_mat(file_path, mat_key)
+                    # 将当前数据集场景读取为 HWC，并归一化到 [0, 1]。
+                    img1 = load_hsi_mat(
+                        file_path,
+                        mat_key,
+                        expected_bands=n_bands,
+                    )
                     if img1.shape[-1] != R.shape[1]:
                         raise ValueError(
                             f"{file_path} 的波段数为 {img1.shape[-1]}，"

@@ -224,21 +224,40 @@ def Gaussian_downsample(x, psf, s):
 create_F函数
 　　该函数生成一个归一化的光谱响应矩阵，用于模拟多光谱传感器对高光谱图像的光谱下采样过程。
 """
-def create_F():
-    F = np.array(
-        [[2 , 1 , 1 , 1 , 1 , 1 , 0 , 0 , 0 , 0 , 0 , 0 , 0 , 0 , 0 , 0 , 2 , 6 , 11, 17, 21, 22, 21, 20, 20, 19, 19, 18, 18, 17, 17],
-                [1 , 1 , 1 , 1 , 1 , 1 , 2 , 4 , 6 , 8 , 11, 16, 19, 21, 20, 18, 16, 14, 11, 7 , 5 , 3 , 2 , 2 , 1 , 1 , 2 , 2 , 2 , 2 , 2 ],
-                [7 , 10, 15, 19, 25, 29, 30, 29, 27, 22, 16, 9 , 2 , 0 , 0 , 0 , 0 , 0 , 0 , 0 , 1 , 1 , 1 , 1 , 1 , 1 , 1 , 1 , 1 , 1 , 1]],
-        dtype=float64)
+def create_F(n_bands=31, n_select_bands=3, response_type="cave"):
+    """
+    构造固定光谱响应矩阵。
 
-    for band in range(0, 3, 1):
-        div = np.sum(F[band][: : 1])
+    CAVE/Harvard 沿用原始 31 波段到 3 波段响应；Pavia 按课题组框架
+    使用 102 波段 HSI 和 1 波段高分辨率观测，因此采用归一化均匀响应。
+    """
+    response_type = str(response_type).lower()
+    n_bands = int(n_bands)
+    n_select_bands = int(n_select_bands)
 
-        # 对光谱响应矩阵进行归一化处理。
-        for i in range(0, 31, 1):
-            F[band][i] = F[band][i] / div
+    if response_type == "cave":
+        if n_bands != 31 or n_select_bands != 3:
+            raise ValueError(
+                "CAVE 光谱响应仅支持 n_bands=31、n_select_bands=3，"
+                f"当前为 {n_bands} 和 {n_select_bands}。"
+            )
+        response = np.array(
+            [[2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 6, 11, 17, 21, 22, 21, 20, 20, 19, 19, 18, 18, 17, 17],
+             [1, 1, 1, 1, 1, 1, 2, 4, 6, 8, 11, 16, 19, 21, 20, 18, 16, 14, 11, 7, 5, 3, 2, 2, 1, 1, 2, 2, 2, 2, 2],
+             [7, 10, 15, 19, 25, 29, 30, 29, 27, 22, 16, 9, 2, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]],
+            dtype=np.float64,
+        )
+    elif response_type == "uniform":
+        response = np.ones((n_select_bands, n_bands), dtype=np.float64)
+    else:
+        raise ValueError(
+            f"不支持的光谱响应类型 {response_type!r}，可选值为 cave 或 uniform。"
+        )
 
-    return F
+    response_sum = response.sum(axis=1, keepdims=True)
+    if np.any(response_sum <= 0.0):
+        raise ValueError("光谱响应矩阵存在和不为正的通道。")
+    return response / response_sum
 
 
 """
@@ -591,8 +610,9 @@ class Loss_ERGAS(nn.Module):
     __init__函数
     　　该函数为构造函数。
     """
-    def __init__(self):
+    def __init__(self, scale=8):
         super(Loss_ERGAS, self).__init__()
+        self.scale = float(scale)
 
     """
     forward函数
@@ -602,8 +622,7 @@ class Loss_ERGAS(nn.Module):
     img_fus     融合图像（模型预测的高分辨率高光谱图像，形状与img_tgt相同。）
     """
     def forward(self, img_tgt, img_fus):
-        _ = self
-        scale = 8
+        scale = self.scale
         # 去除batch维度。
         img_tgt = img_tgt.squeeze(0).data.cpu().numpy()
         img_fus = img_fus.squeeze(0).data.cpu().numpy()
