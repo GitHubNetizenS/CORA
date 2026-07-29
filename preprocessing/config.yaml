@@ -174,7 +174,8 @@ Pavia:
     n_bands: 102
     n_select_bands: 1
     spectral_response: uniform
-    downsample_factor: 4
+    # 与 CAVE、Harvard 保持统一的 LRTN 8 倍空间退化协议。
+    downsample_factor: 8
     training_size: 64
     train_stride: 32
     num: 9
