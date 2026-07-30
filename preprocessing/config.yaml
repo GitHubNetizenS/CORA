@@ -171,9 +171,13 @@ Pavia:
     <<: *cave_train
     dataset_root: /root/autodl-tmp/datasets/lrtn/Pavia
     mat_key: data
+    normalization: fixed_max
+    normalization_value: 8000.0
     n_bands: 102
-    n_select_bands: 1
-    spectral_response: uniform
+    n_select_bands: 4
+    spectral_response: mat_file
+    spectral_response_path: assets/pavia_ikonos_R.mat
+    spectral_response_key: R
     # 与 CAVE、Harvard 保持统一的 LRTN 8 倍空间退化协议。
     downsample_factor: 8
     training_size: 64
@@ -182,7 +186,7 @@ Pavia:
     # 课题组 Pavia 训练框架采用 2000 epoch；每个 192x192 场景产生的
     # 训练 patch 数明显少于 CAVE，因此这里保留该训练轮数。
     end_epoch: 2000
-    experiment_name: 070_seed42_pavia_final_061_logic_no_swa
+    experiment_name: 070_seed42_pavia4_final_061_logic_no_swa
   test:
     <<: *cave_test
     test_stride: 32

@@ -39,8 +39,14 @@ def _load_mat_arrays(file_path):
             }
 
 
-def load_hsi_mat(file_path, mat_key, expected_bands=None):
-    """读取高光谱图像、转换为 HWC，并按场景最大值归一化。"""
+def load_hsi_mat(
+        file_path,
+        mat_key,
+        expected_bands=None,
+        normalization="scene_max",
+        normalization_value=None,
+):
+    """读取高光谱图像、转换为 HWC，并按配置执行归一化。"""
     mat_data = _load_mat_arrays(file_path)
     available_keys = sorted(mat_data)
 
@@ -101,7 +107,35 @@ def load_hsi_mat(file_path, mat_key, expected_bands=None):
             f"{file_path} 中 {selected_key!r} 的最大值为 {image_max}，无法归一化。"
         )
 
-    return image / image_max
+    normalization = str(normalization).lower()
+    if normalization == "scene_max":
+        image = image / image_max
+    elif normalization == "fixed_max":
+        if normalization_value is None:
+            raise ValueError(
+                "normalization='fixed_max' requires normalization_value."
+            )
+        normalization_value = float(normalization_value)
+        if not np.isfinite(normalization_value) or normalization_value <= 0.0:
+            raise ValueError(
+                f"normalization_value must be positive, got {normalization_value}."
+            )
+        # Raw Pavia Centre patches use uint16 values in [0, 8000].
+        # Keep already-normalized copies unchanged.
+        if image_max > 1.0 + 1e-6:
+            image = image / normalization_value
+    elif normalization in {"none", "identity"}:
+        pass
+    else:
+        raise ValueError(
+            f"Unsupported normalization mode {normalization!r}; "
+            "expected scene_max, fixed_max, or none."
+        )
+
+    if not np.all(np.isfinite(image)):
+        raise ValueError(f"{file_path} contains NaN or Inf after normalization.")
+
+    return image
 
 
 """
@@ -122,7 +156,19 @@ class HSIDataProcess(Dataset):
     PSF                 点扩散函数（Gauss模糊核，用于从HRHSI下采样到LRHSI。）
     num                 要读取的场景数量（如CAVE共32个场景，通常取前20或全部）
     """
-    def __init__(self, path, R, training_size, stride, downsample_factor, PSF, num, mat_key="hsi"):
+    def __init__(
+            self,
+            path,
+            R,
+            training_size,
+            stride,
+            downsample_factor,
+            PSF,
+            num,
+            mat_key="hsi",
+            normalization="scene_max",
+            normalization_value=None,
+    ):
         imglist = sorted(
             filename for filename in os.listdir(path)
             if is_hsi_file(filename)
@@ -141,7 +187,13 @@ class HSIDataProcess(Dataset):
             # 读取标签为“b”的图像，也即高分辨率高光谱图像（HRHSI），并对其值归一化为[0, 1]。
             # Havard数据集的标签为“ref”，ICVL数据集的标签为“HSI”，某些CAVE数据集的标签为“b”或“hsi”。
             # 此处采用CAVE数据集，标签为“hsi”。
-            img1 = load_hsi_mat(data_path, mat_key, expected_bands=R.shape[1])
+            img1 = load_hsi_mat(
+                data_path,
+                mat_key,
+                expected_bands=R.shape[1],
+                normalization=normalization,
+                normalization_value=normalization_value,
+            )
             if img1.shape[-1] != R.shape[1]:
                 raise ValueError(
                     f"{data_path} 的波段数为 {img1.shape[-1]}，"

@@ -394,6 +394,8 @@ if "__main__"==__name__:
         f"/root/autodl-tmp/datasets/lrtn/{dataset_name}",
     )
     mat_key = str(cfg["train"].get("mat_key", "hsi"))
+    normalization = str(cfg["train"].get("normalization", "scene_max"))
+    normalization_value = cfg["train"].get("normalization_value")
     run_root = os.environ.get("AMSF_RUN_ROOT", cfg["train"].get("run_root", "/root/autodl-tmp/runs/AMSF-Net"))
     run_path = os.path.join(run_root, cycle_experiment_name)
     save_train_path = os.path.join(run_path, "checkpoints", "train")
@@ -423,12 +425,26 @@ if "__main__"==__name__:
     n_bands =            int(cfg["train"].get("n_bands", 31))
     n_select_bands =     int(cfg["train"].get("n_select_bands", 3))
     spectral_response =  str(cfg["train"].get("spectral_response", "cave"))
+    spectral_response_path = cfg["train"].get("spectral_response_path")
+    spectral_response_key = str(cfg["train"].get("spectral_response_key", "R"))
+    if spectral_response_path:
+        spectral_response_path = os.path.expanduser(
+            os.path.expandvars(str(spectral_response_path))
+        )
+        if not os.path.isabs(spectral_response_path):
+            spectral_response_path = os.path.join(
+                os.path.dirname(os.path.abspath(config_file)),
+                spectral_response_path,
+            )
+        spectral_response_path = os.path.normpath(spectral_response_path)
     psf_kernel_size =    int(cfg["train"].get("psf_kernel_size", 8))
     psf_sigma =          float(cfg["train"].get("psf_sigma", 3.0))
     R = create_F(
         n_bands=n_bands,
         n_select_bands=n_select_bands,
         response_type=spectral_response,
+        response_path=spectral_response_path,
+        response_key=spectral_response_key,
     )
     PSF = fspecial("gaussian", psf_kernel_size, psf_sigma)
     downsample_factor = cfg["train"]["downsample_factor"]   # 空间下采样倍率。
@@ -535,6 +551,8 @@ if "__main__"==__name__:
         PSF,
         num,
         mat_key=mat_key,
+        normalization=normalization,
+        normalization_value=normalization_value,
     )
     train_loader = data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     max_iteration = math.ceil(len(train_dataset)/batch_size) * end_epoch
@@ -1059,6 +1077,8 @@ if "__main__"==__name__:
                         file_path,
                         mat_key,
                         expected_bands=n_bands,
+                        normalization=normalization,
+                        normalization_value=normalization_value,
                     )
                     if img1.shape[-1] != R.shape[1]:
                         raise ValueError(

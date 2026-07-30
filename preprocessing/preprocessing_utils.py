@@ -14,6 +14,7 @@ import torch.nn.functional  as F
 from math           import exp
 from numpy          import *
 from scipy          import signal
+from scipy          import io as scipy_io
 from torch          import nn
 from scipy.signal   import savgol_coeffs
 from torch.autograd import Variable
@@ -224,12 +225,18 @@ def Gaussian_downsample(x, psf, s):
 create_F函数
 　　该函数生成一个归一化的光谱响应矩阵，用于模拟多光谱传感器对高光谱图像的光谱下采样过程。
 """
-def create_F(n_bands=31, n_select_bands=3, response_type="cave"):
+def create_F(
+        n_bands=31,
+        n_select_bands=3,
+        response_type="cave",
+        response_path=None,
+        response_key="R",
+):
     """
     构造固定光谱响应矩阵。
 
-    CAVE/Harvard 沿用原始 31 波段到 3 波段响应；Pavia 按课题组框架
-    使用 102 波段 HSI 和 1 波段高分辨率观测，因此采用归一化均匀响应。
+    CAVE/Harvard 沿用原始 31 波段到 3 波段响应；Pavia 可从 MAT 文件
+    读取 4x103 响应，截取前 102 列并逐行归一化为 4x102 响应。
     """
     response_type = str(response_type).lower()
     n_bands = int(n_bands)
@@ -249,9 +256,46 @@ def create_F(n_bands=31, n_select_bands=3, response_type="cave"):
         )
     elif response_type == "uniform":
         response = np.ones((n_select_bands, n_bands), dtype=np.float64)
+    elif response_type == "mat_file":
+        if not response_path:
+            raise ValueError("response_type='mat_file' requires response_path.")
+        if not os.path.isfile(response_path):
+            raise FileNotFoundError(
+                f"Spectral response file does not exist: {response_path}"
+            )
+
+        response_data = scipy_io.loadmat(response_path)
+        if response_key not in response_data:
+            available_keys = sorted(
+                key for key in response_data if not key.startswith("__")
+            )
+            raise KeyError(
+                f"{response_path} does not contain key {response_key!r}; "
+                f"available keys are {available_keys}."
+            )
+
+        response = np.squeeze(
+            np.asarray(response_data[response_key], dtype=np.float64)
+        )
+        if response.ndim != 2:
+            raise ValueError(
+                f"Spectral response {response_key!r} in {response_path} "
+                f"must be 2-D, got shape {response.shape}."
+            )
+
+        if response.shape[0] == n_select_bands and response.shape[1] >= n_bands:
+            response = response[:, :n_bands]
+        elif response.shape[1] == n_select_bands and response.shape[0] >= n_bands:
+            response = response[:n_bands, :].T
+        else:
+            raise ValueError(
+                f"Spectral response shape {response.shape} is incompatible with "
+                f"n_select_bands={n_select_bands}, n_bands={n_bands}."
+            )
     else:
         raise ValueError(
-            f"不支持的光谱响应类型 {response_type!r}，可选值为 cave 或 uniform。"
+            f"不支持的光谱响应类型 {response_type!r}，"
+            "可选值为 cave、uniform 或 mat_file。"
         )
 
     response_sum = response.sum(axis=1, keepdims=True)
