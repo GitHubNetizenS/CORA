@@ -540,6 +540,65 @@ class Loss_SAM(nn.Module):
         return np.mean(sam)
 
 
+def _fixed_binomial_blur_5x5(x):
+    """Apply a fixed depthwise 5x5 binomial Gaussian approximation."""
+    kernel_1d = x.new_tensor([1.0, 4.0, 6.0, 4.0, 1.0])
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    kernel = kernel_2d.view(1, 1, 5, 5).expand(x.size(1), 1, 5, 5)
+    padded = F.pad(x, (2, 2, 2, 2), mode="reflect")
+    return F.conv2d(padded, kernel, groups=x.size(1))
+
+
+def multiscale_laplacian_observation_loss(prediction, observation, num_scales=3):
+    """Compare fixed Laplacian-pyramid residuals in the real observation domain."""
+    if prediction.shape != observation.shape:
+        raise ValueError(
+            "prediction and observation must have identical shapes, "
+            f"got {prediction.shape} and {observation.shape}."
+        )
+    if prediction.ndim != 4:
+        raise ValueError("prediction and observation must be BCHW tensors.")
+    if num_scales < 1:
+        raise ValueError("num_scales must be at least 1.")
+
+    pred_level = prediction
+    obs_level = observation.detach()
+    total_loss = prediction.new_tensor(0.0)
+    weight_sum = 0.0
+
+    for scale_idx in range(num_scales):
+        if pred_level.size(-2) < 4 or pred_level.size(-1) < 4:
+            raise ValueError(
+                f"num_scales={num_scales} is too large for spatial size "
+                f"{prediction.shape[-2:]}."
+            )
+
+        pred_low = F.avg_pool2d(
+            _fixed_binomial_blur_5x5(pred_level), kernel_size=2, stride=2
+        )
+        obs_low = F.avg_pool2d(
+            _fixed_binomial_blur_5x5(obs_level), kernel_size=2, stride=2
+        )
+        pred_recon = F.interpolate(
+            pred_low, size=pred_level.shape[-2:], mode="bilinear", align_corners=False
+        )
+        obs_recon = F.interpolate(
+            obs_low, size=obs_level.shape[-2:], mode="bilinear", align_corners=False
+        )
+
+        scale_weight = 0.5 ** scale_idx
+        total_loss = total_loss + scale_weight * F.l1_loss(
+            pred_level - pred_recon,
+            obs_level - obs_recon,
+        )
+        weight_sum += scale_weight
+        pred_level = pred_low
+        obs_level = obs_low
+
+    return total_loss / weight_sum
+
+
 """
 Loss_SSIM类
 　　该类计算两幅图像之间的结构相似性指数（SSIM），作为损失函数或评估指标。SSIM越接近1表示两幅图像越相似。
