@@ -1,6 +1,6 @@
 # config.yaml文件
 # 该文件用于定义数据集训练和测试的相关参数。
-active_dataset: Pavia
+active_dataset: CAVE
 
 CAVE:
   train: &cave_train
@@ -15,7 +15,7 @@ CAVE:
 #    train_stride: 64
     seed: 42
     lr: 0.0001
-    end_epoch: 1000
+    end_epoch: 1500
 #    end_epoch: 50
 #    end_epoch: 450
     weight_decay: 0
@@ -90,7 +90,7 @@ CAVE:
     # experiment_name: 060_seed42_spectral_ob_rely_equivariant
     # 068：恢复实验061的完整训练逻辑，不使用SWA或067新增的变换后HRMSI观测损失。
     # 使用独立目录，避免续训或覆盖已经完成的061、066和067实验。
-    experiment_name: 068_seed42_final_061_logic_no_swa
+    experiment_name: 066_seed42_reproduce_061_no_swa
     legacy_cycle_only_log: false
     pullback_mode: dual_pullback_fixed_legacy_spatial_v1
     # 下面的 DDL 权重在 use_ddl=false 时不会参与训练，仅保留用于后续恢复 DDL 实验。
