@@ -15,11 +15,7 @@ import torch.utils.data     as data
 import matplotlib.pyplot    as plt
 from tqdm                       import tqdm
 from preprocessing_dataloader   import *
-from preprocessing_utils        import (
-    BlurDownsample,
-    DualLearningLoss,
-    multiscale_laplacian_observation_loss,
-)
+from preprocessing_utils        import BlurDownsample, DualLearningLoss
 from models.AMSF                import *
 
 # 允许重复加载 OpenMP 运行库，避免部分 Windows/Conda 环境下的库冲突报错。
@@ -338,19 +334,6 @@ if "__main__"==__name__:
             "可选值为main或symmetric。"
         )
     lambda_spectral_shape = float(cfg["train"].get("lambda_spectral_shape", 0.0))
-    observation_laplacian_enable = bool(
-        cfg["train"].get("observation_laplacian_enable", False)
-    )
-    lambda_observation_laplacian = float(
-        cfg["train"].get("lambda_observation_laplacian", 0.0)
-    )
-    observation_laplacian_scales = int(
-        cfg["train"].get("observation_laplacian_scales", 3)
-    )
-    if lambda_observation_laplacian < 0.0:
-        raise ValueError("lambda_observation_laplacian must be non-negative.")
-    if observation_laplacian_scales < 1:
-        raise ValueError("observation_laplacian_scales must be at least 1.")
     if (
             spectral_shape_loss_enable
             and spectral_shape_loss_scope == "symmetric"
@@ -546,10 +529,6 @@ if "__main__"==__name__:
                                        "lambda_spectral_shape", "loss_spectral_shape_main",
                                        "loss_spectral_shape_d4", "loss_spectral_shape",
                                        "spectral_shape_eff", "spectral_shape_ratio",
-                                       "lambda_observation_laplacian",
-                                       "loss_observation_laplacian",
-                                       "observation_laplacian_eff",
-                                       "observation_laplacian_ratio",
                                        "lambda_transformed_observation",
                                        "loss_transformed_obs_spatial",
                                        "loss_transformed_obs_spectral",
@@ -688,9 +667,6 @@ if "__main__"==__name__:
         spectral_shape_loss_epoch_sum = 0.0
         spectral_shape_eff_epoch_sum = 0.0
         spectral_shape_ratio_epoch_sum = 0.0
-        observation_laplacian_epoch_sum = 0.0
-        observation_laplacian_eff_epoch_sum = 0.0
-        observation_laplacian_ratio_epoch_sum = 0.0
         transformed_obs_spatial_epoch_sum = 0.0
         transformed_obs_spectral_epoch_sum = 0.0
         transformed_observation_epoch_sum = 0.0
@@ -939,20 +915,6 @@ if "__main__"==__name__:
                 loss_spectral_shape = output_hrhsi.new_tensor(0.0)
             spectral_shape_eff = lambda_spectral_shape * loss_spectral_shape
 
-            # 真实HRMSI观测域的多尺度Laplacian结构一致性。
-            # 固定金字塔只补充局部结构约束，不引入可学习参数或GT-HRHSI监督。
-            if observation_laplacian_enable and lambda_observation_laplacian > 0.0:
-                loss_observation_laplacian = multiscale_laplacian_observation_loss(
-                    output_hrmsi,
-                    hr_msi,
-                    num_scales=observation_laplacian_scales,
-                )
-            else:
-                loss_observation_laplacian = output_hrhsi.new_tensor(0.0)
-            observation_laplacian_eff = (
-                lambda_observation_laplacian * loss_observation_laplacian
-            )
-
             batch_count += 1
             if compute_jac:
                 jac_active_count += 1
@@ -966,7 +928,6 @@ if "__main__"==__name__:
                 + equivariance_eff
                 + transformed_msi_observation_eff
                 + spectral_shape_eff
-                + observation_laplacian_eff
                 + transformed_observation_eff
                 + transformed_spectral_shape_eff
             )
@@ -1025,16 +986,6 @@ if "__main__"==__name__:
             spectral_shape_loss_epoch_sum += loss_spectral_shape.detach().item()
             spectral_shape_eff_epoch_sum += spectral_shape_eff.detach().item()
             spectral_shape_ratio_epoch_sum += spectral_shape_ratio
-            observation_laplacian_ratio = (
-                observation_laplacian_eff.detach().item() / loss_denom
-            )
-            observation_laplacian_epoch_sum += (
-                loss_observation_laplacian.detach().item()
-            )
-            observation_laplacian_eff_epoch_sum += (
-                observation_laplacian_eff.detach().item()
-            )
-            observation_laplacian_ratio_epoch_sum += observation_laplacian_ratio
             # ===========================================================================================
             # 旧版消融中曾测试 L1/Charbonnier/动态边缘权重等替代损失。
             # 当前收敛版本不再启用这些分支，保留说明即可。
@@ -1071,7 +1022,6 @@ if "__main__"==__name__:
                               transform_log_name: f"{transform_log_value.item():.8f}",
                               "msiT":   f"{transformed_msi_observation_eff.item():.8f}",
                               "spe":    f"{spectral_shape_eff.item():.8f}",
-                              "lap":    f"{observation_laplacian_eff.item():.8f}",
                               "lr":     f"{lr_now:.8f}"})
         scheduler.step()
 
@@ -1202,15 +1152,6 @@ if "__main__"==__name__:
             mean_spectral_shape_loss = spectral_shape_loss_epoch_sum / jac_stat_count
             mean_spectral_shape_eff = spectral_shape_eff_epoch_sum / jac_stat_count
             mean_spectral_shape_ratio = spectral_shape_ratio_epoch_sum / jac_stat_count
-            mean_observation_laplacian = (
-                observation_laplacian_epoch_sum / jac_stat_count
-            )
-            mean_observation_laplacian_eff = (
-                observation_laplacian_eff_epoch_sum / jac_stat_count
-            )
-            mean_observation_laplacian_ratio = (
-                observation_laplacian_ratio_epoch_sum / jac_stat_count
-            )
             mean_transformed_obs_spatial = (
                 transformed_obs_spatial_epoch_sum / jac_stat_count
             )
@@ -1322,10 +1263,6 @@ if "__main__"==__name__:
                             mean_spectral_shape_loss,
                             mean_spectral_shape_eff,
                             mean_spectral_shape_ratio,
-                            lambda_observation_laplacian,
-                            mean_observation_laplacian,
-                            mean_observation_laplacian_eff,
-                            mean_observation_laplacian_ratio,
                             lambda_transformed_observation,
                             mean_transformed_obs_spatial,
                             mean_transformed_obs_spectral,
