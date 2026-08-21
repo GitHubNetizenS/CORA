@@ -1,6 +1,6 @@
 # config.yaml文件
 # 该文件用于定义数据集训练和测试的相关参数。
-active_dataset: CAVE
+active_dataset: Chikusei
 
 CAVE:
   train: &cave_train
@@ -187,6 +187,37 @@ Pavia:
     # 训练 patch 数明显少于 CAVE，因此这里保留该训练轮数。
     end_epoch: 2000
     experiment_name: 070_seed42_pavia4_final_061_logic_no_swa
+  test:
+    <<: *cave_test
+    test_stride: 32
+    psnr_optimal: 0.0
+    rmse_optimal: 1000000.0
+
+Chikusei:
+  train:
+    <<: *cave_train
+    dataset_root: /root/autodl-tmp/datasets/lrtn/Chikusei
+    # H5内GT为NCHW批量HRHSI；文件自带LRHSI/RGB属于x4与3通道协议，不参与本实验。
+    dataset_format: chikusei_h5
+    mat_key: GT
+    normalization: none
+    n_bands: 128
+    n_select_bands: 8
+    spectral_response: mat_file
+    spectral_response_path: resources/chikusei/chikusei_worldview2_srf_8x128.mat
+    spectral_response_key: R
+    # 使用与CAVE/Pavia一致的固定Gaussian PSF和8倍空间退化。
+    downsample_factor: 8
+    psf_kernel_size: 8
+    psf_sigma: 3.0
+    training_size: 64
+    train_stride: 64
+    # 官方预处理训练H5包含1166个64x64 GT patch。
+    num: 1166
+    cache_observations: true
+    # 每轮约73次参数更新；4000轮约29.2万次更新，先作为完整收敛检查预算。
+    end_epoch: 4000
+    experiment_name: 073_seed42_chikusei8_wv2_final_061_logic_no_swa
   test:
     <<: *cave_test
     test_stride: 32

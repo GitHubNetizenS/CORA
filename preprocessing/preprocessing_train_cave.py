@@ -15,6 +15,11 @@ import torch.utils.data     as data
 import matplotlib.pyplot    as plt
 from tqdm                       import tqdm
 from preprocessing_dataloader   import *
+from preprocessing_chikusei     import (
+    ChikuseiH5Dataset,
+    discover_chikusei_h5_samples,
+    load_chikusei_h5_sample,
+)
 from preprocessing_utils        import BlurDownsample, DualLearningLoss
 from models.AMSF                import *
 
@@ -394,6 +399,7 @@ if "__main__"==__name__:
         f"/root/autodl-tmp/datasets/lrtn/{dataset_name}",
     )
     mat_key = str(cfg["train"].get("mat_key", "hsi"))
+    dataset_format = str(cfg["train"].get("dataset_format", "scene_files")).lower()
     normalization = str(cfg["train"].get("normalization", "scene_max"))
     normalization_value = cfg["train"].get("normalization_value")
     run_root = os.environ.get("AMSF_RUN_ROOT", cfg["train"].get("run_root", "/root/autodl-tmp/runs/AMSF-Net"))
@@ -407,14 +413,30 @@ if "__main__"==__name__:
     metrics_path = os.path.join(run_path, "metrics")
     train_path = os.environ.get("AMSF_TRAIN_PATH", os.path.join(dataset_root, "Train"))
     test_path = os.environ.get("AMSF_TEST_PATH", os.path.join(dataset_root, "Test"))
-    # 4. 读取验证集文件列表，并打印当前实验路径。
-    test_filename_list = sorted(
-        filename for filename in get_filename_list(test_path)
-        if is_hsi_file(filename)
+    n_bands = int(cfg["train"].get("n_bands", 31))
+    n_select_bands = int(cfg["train"].get("n_select_bands", 3))
+    # 4. 读取验证样本列表。普通数据集按文件读取；Chikusei H5按文件内部GT样本读取。
+    if dataset_format == "chikusei_h5":
+        test_sample_list = discover_chikusei_h5_samples(
+            test_path,
+            key=mat_key,
+            expected_bands=n_bands,
+        )
+    elif dataset_format == "scene_files":
+        test_sample_list = sorted(
+            filename for filename in get_filename_list(test_path)
+            if is_hsi_file(filename)
+        )
+    else:
+        raise ValueError(
+            f"不支持数据格式 {dataset_format!r}，可选值为 scene_files 或 chikusei_h5。"
+        )
+    if not test_sample_list:
+        raise RuntimeError(f"测试目录 {test_path} 中没有找到可用的高光谱样本。")
+    print(
+        f"数据集: {dataset_name}，格式: {dataset_format}，"
+        f"数据键: {mat_key}，测试样本数: {len(test_sample_list)}"
     )
-    if not test_filename_list:
-        raise RuntimeError(f"测试目录 {test_path} 中没有找到支持的高光谱数据文件。")
-    print(f"数据集: {dataset_name}，MAT键名: {mat_key}")
     print(f"训练数据路径: {train_path}")
     print(f"测试数据路径: {test_path}")
     print(f"实验输出路径: {run_path}")
@@ -422,8 +444,6 @@ if "__main__"==__name__:
     # 如果需要直接使用 PyTorch 的均方误差损失，可启用下面这一行。
     # loss_func = nn.MSELoss(reduction="mean").cuda()
     # 按数据集配置构造固定光谱响应矩阵和 Gaussian PSF。
-    n_bands =            int(cfg["train"].get("n_bands", 31))
-    n_select_bands =     int(cfg["train"].get("n_select_bands", 3))
     spectral_response =  str(cfg["train"].get("spectral_response", "cave"))
     spectral_response_path = cfg["train"].get("spectral_response_path")
     spectral_response_key = str(cfg["train"].get("spectral_response_key", "R"))
@@ -542,18 +562,35 @@ if "__main__"==__name__:
         df.to_csv(excel_path, index=False)
     # ===========================================================================================
     # 1. 构造训练数据集和 DataLoader。
-    train_dataset = HSIDataProcess(
-        train_path,
-        R,
-        training_size,
-        train_stride,
-        downsample_factor,
-        PSF,
-        num,
-        mat_key=mat_key,
-        normalization=normalization,
-        normalization_value=normalization_value,
-    )
+    if dataset_format == "chikusei_h5":
+        train_dataset = ChikuseiH5Dataset(
+            train_path,
+            R,
+            training_size,
+            train_stride,
+            downsample_factor,
+            PSF,
+            num=num,
+            mat_key=mat_key,
+            normalization=normalization,
+            normalization_value=normalization_value,
+            cache_observations=bool(
+                cfg["train"].get("cache_observations", True)
+            ),
+        )
+    else:
+        train_dataset = HSIDataProcess(
+            train_path,
+            R,
+            training_size,
+            train_stride,
+            downsample_factor,
+            PSF,
+            num,
+            mat_key=mat_key,
+            normalization=normalization,
+            normalization_value=normalization_value,
+        )
     train_loader = data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     max_iteration = math.ceil(len(train_dataset)/batch_size) * end_epoch
 
@@ -1070,22 +1107,34 @@ if "__main__"==__name__:
             ergas_meter = AverageMeter()
 
             with torch.no_grad():
-                for i, filename in enumerate(test_filename_list):
-                    file_path = os.path.join(test_path, filename)
-                    # 将当前数据集场景读取为 HWC，并归一化到 [0, 1]。
-                    img1 = load_hsi_mat(
-                        file_path,
-                        mat_key,
-                        expected_bands=n_bands,
-                        normalization=normalization,
-                        normalization_value=normalization_value,
-                    )
+                for i, test_sample in enumerate(test_sample_list):
+                    # 将当前数据集场景读取为 HWC。Chikusei H5中的GT样本按索引读取，
+                    # 不使用文件自带的x4 LRHSI或3通道RGB观测。
+                    if dataset_format == "chikusei_h5":
+                        file_path = test_sample.name
+                        img1 = load_chikusei_h5_sample(
+                            test_sample,
+                            normalization=normalization,
+                            normalization_value=normalization_value,
+                        )
+                    else:
+                        file_path = os.path.join(test_path, test_sample)
+                        img1 = load_hsi_mat(
+                            file_path,
+                            mat_key,
+                            expected_bands=n_bands,
+                            normalization=normalization,
+                            normalization_value=normalization_value,
+                        )
                     if img1.shape[-1] != R.shape[1]:
                         raise ValueError(
                             f"{file_path} 的波段数为 {img1.shape[-1]}，"
                             f"但光谱响应矩阵要求 {R.shape[1]} 个波段。"
                         )
-                    HRHSI_np = np.transpose(img1, (2, 0, 1)).astype(np.float32)
+                    HRHSI_np = np.ascontiguousarray(
+                        np.transpose(img1, (2, 0, 1)),
+                        dtype=np.float32,
+                    )
                     HRHSI = torch.Tensor(HRHSI_np)
                     # 构造 GT HRHSI，并使用 LRTN 的验证退化方式生成 LRHSI 和 HRMSI。
                     HRHSI_gt = torch.unsqueeze(HRHSI, 0).cuda()
